@@ -83,16 +83,17 @@ type Project struct {
 }
 
 var (
-	flagMark       = flag.Bool("mark", false, "Mark current state as successful (update cache)")
-	flagTests      = flag.Bool("tests", false, "Only output test projects")
-	flagAll        = flag.Bool("all", false, "Output all projects, not just affected")
-	flagVerbose    = flag.Bool("v", false, "Verbose output")
-	flagCache      = flag.String("cache", "", "Cache file path (default: .donotnet-cache in git root)")
-	flagDir        = flag.String("C", "", "Change to directory before running")
-	flagVersion    = flag.Bool("version", false, "Show version and build info")
-	flagParallel   = flag.Int("j", 0, "Number of parallel workers (default: number of projects)")
-	flagLocal      = flag.Bool("local", false, "Only scan current directory, not entire git repo")
-	flagKeepGoing  = flag.Bool("k", false, "Keep going on errors (don't stop on first failure)")
+	flagMark        = flag.Bool("mark", false, "Mark current state as successful (update cache)")
+	flagTests       = flag.Bool("tests", false, "Only output test projects")
+	flagAll         = flag.Bool("all", false, "Output all projects, not just affected")
+	flagVerbose     = flag.Bool("v", false, "Verbose output")
+	flagCache       = flag.String("cache", "", "Cache file path (default: .donotnet-cache in git root)")
+	flagDir         = flag.String("C", "", "Change to directory before running")
+	flagVersion     = flag.Bool("version", false, "Show version and build info")
+	flagParallel    = flag.Int("j", 0, "Number of parallel workers (default: number of projects)")
+	flagLocal       = flag.Bool("local", false, "Only scan current directory, not entire git repo")
+	flagKeepGoing   = flag.Bool("k", false, "Keep going on errors (don't stop on first failure)")
+	flagShowCached  = flag.Bool("show-cached", false, "Show cached projects in output")
 )
 
 func init() {
@@ -224,16 +225,19 @@ func main() {
 	// Find affected projects (changed + dependents)
 	affected := findAffectedProjects(changed, graph, projects)
 
-	// Filter to relevant projects
+	// Filter to relevant projects and track cached
 	var targetProjects []*Project
+	var cachedProjects []*Project
 	for _, p := range projects {
 		if command == "test" && !p.IsTest {
 			continue
 		}
-		if !*flagAll && !affected[p.Path] {
+		if *flagTests && !p.IsTest {
 			continue
 		}
-		if *flagTests && !p.IsTest {
+		// Track as cached if not affected (and not using -all)
+		if !*flagAll && !affected[p.Path] {
+			cachedProjects = append(cachedProjects, p)
 			continue
 		}
 		targetProjects = append(targetProjects, p)
@@ -242,11 +246,16 @@ func main() {
 	// Handle commands
 	if command != "" {
 		if len(targetProjects) == 0 {
-			fmt.Fprintf(os.Stderr, "No affected projects to %s\n", command)
+			fmt.Fprintf(os.Stderr, "No affected projects to %s (%d cached)\n", command, len(cachedProjects))
+			// Print all cached projects like a summary
+			for _, p := range cachedProjects {
+				fmt.Fprintf(os.Stderr, "  %s○%s %s (cached)\n", colorDim, colorReset+colorDim, p.Name)
+			}
+			fmt.Fprintf(os.Stderr, "%s\n%s0/0 succeeded, %d cached%s\n", colorReset, colorGreen, len(cachedProjects), colorReset)
 			return
 		}
 
-		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, cache, cachePath, forwardGraph, projectsByPath)
+		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, cache, cachePath, forwardGraph, projectsByPath, cachedProjects)
 		if !success {
 			os.Exit(1)
 		}
@@ -610,6 +619,7 @@ const (
 	colorReset  = "\033[0m"
 	colorRed    = "\033[31m"
 	colorGreen  = "\033[32m"
+	colorDim    = "\033[2m"
 )
 
 func extractTestStats(output string) string {
@@ -681,7 +691,7 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, cache *Cache, cachePath string, forwardGraph map[string][]string, projectsByPath map[string]*Project) bool {
+func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, cache *Cache, cachePath string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -693,7 +703,18 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		numWorkers = len(projects)
 	}
 
-	fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d workers)...\n", command, len(projects), numWorkers)
+	if len(cachedProjects) > 0 {
+		fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d cached, %d workers)...\n", command, len(projects), len(cachedProjects), numWorkers)
+	} else {
+		fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d workers)...\n", command, len(projects), numWorkers)
+	}
+
+	// Print cached projects at the top if requested
+	if *flagShowCached && len(cachedProjects) > 0 {
+		for _, p := range cachedProjects {
+			fmt.Fprintf(os.Stderr, "  %s○ %s (cached)%s\n", colorDim, p.Name, colorReset)
+		}
+	}
 
 	startTime := time.Now()
 
@@ -870,7 +891,11 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					}
 					cancel() // Stop other goroutines
 					totalDuration := time.Since(startTime).Round(time.Millisecond)
-					fmt.Fprintf(os.Stderr, "\n%d/%d succeeded (%s)\n", succeeded, len(projects), totalDuration)
+					if len(cachedProjects) > 0 {
+						fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %d cached (%s)\n", colorRed, succeeded, len(projects), colorReset, len(cachedProjects), totalDuration)
+					} else {
+						fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorRed, succeeded, len(projects), colorReset, totalDuration)
+					}
 					return false
 				}
 			}
@@ -901,9 +926,17 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	}
 
 	if len(failures) > 0 {
-		fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorRed, succeeded, len(projects), colorReset, totalDuration)
+		if len(cachedProjects) > 0 {
+			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %d cached (%s)\n", colorRed, succeeded, len(projects), colorReset, len(cachedProjects), totalDuration)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorRed, succeeded, len(projects), colorReset, totalDuration)
+		}
 	} else {
-		fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorGreen, succeeded, len(projects), colorReset, totalDuration)
+		if len(cachedProjects) > 0 {
+			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %d cached (%s)\n", colorGreen, succeeded, len(projects), colorReset, len(cachedProjects), totalDuration)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorGreen, succeeded, len(projects), colorReset, totalDuration)
+		}
 	}
 	return len(failures) == 0
 }
