@@ -60,6 +60,7 @@ func versionString() string {
 
 // Cache stores the state of last successful test runs
 type Cache struct {
+	ArgsHash string                   `json:"args_hash,omitempty"`
 	Projects map[string]*ProjectState `json:"projects"`
 }
 
@@ -199,8 +200,16 @@ func main() {
 		projectsByPath[p.Path] = p
 	}
 
-	// Load cache
+	// Load cache and check args hash
 	cache := loadCache(cachePath)
+	argsHash := hashArgs(dotnetArgs)
+	if cache.ArgsHash != argsHash {
+		if *flagVerbose && cache.ArgsHash != "" {
+			fmt.Fprintf(os.Stderr, "Args changed, invalidating cache\n")
+		}
+		cache.Projects = make(map[string]*ProjectState)
+		cache.ArgsHash = argsHash
+	}
 
 	if *flagMark {
 		// Update cache with current state
@@ -549,6 +558,14 @@ func hashFile(path string) string {
 	}
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h[:16])
+}
+
+func hashArgs(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	h := sha256.Sum256([]byte(strings.Join(args, "\x00")))
+	return fmt.Sprintf("%x", h[:8])
 }
 
 func findAffectedProjects(changed map[string]bool, graph map[string][]string, projects []*Project) map[string]bool {
