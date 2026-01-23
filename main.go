@@ -88,13 +88,14 @@ var (
 	flagTests       = flag.Bool("tests", false, "Only output test projects")
 	flagAll         = flag.Bool("all", false, "Output all projects, not just affected")
 	flagVerbose     = flag.Bool("v", false, "Verbose output")
-	flagCache       = flag.String("cache", "", "Cache file path (default: .donotnet-cache in git root)")
+	flagCacheDir    = flag.String("cache-dir", "", "Cache directory path (default: .donotnet in git root)")
 	flagDir         = flag.String("C", "", "Change to directory before running")
 	flagVersion     = flag.Bool("version", false, "Show version and build info")
 	flagParallel    = flag.Int("j", 0, "Number of parallel workers (default: number of projects)")
 	flagLocal       = flag.Bool("local", false, "Only scan current directory, not entire git repo")
 	flagKeepGoing   = flag.Bool("k", false, "Keep going on errors (don't stop on first failure)")
 	flagShowCached  = flag.Bool("show-cached", false, "Show cached projects in output")
+	flagNoReports   = flag.Bool("no-reports", false, "Disable saving test reports (TRX and console output)")
 )
 
 func init() {
@@ -174,10 +175,14 @@ func main() {
 		}
 	}
 
-	cachePath := *flagCache
-	if cachePath == "" {
-		cachePath = filepath.Join(gitRoot, ".donotnet-cache")
+	cacheDir := *flagCacheDir
+	if cacheDir == "" {
+		cacheDir = filepath.Join(gitRoot, ".donotnet")
 	}
+	// Ensure cache directory exists
+	os.MkdirAll(cacheDir, 0755)
+	cachePath := filepath.Join(cacheDir, "cache.json")
+	reportsDir := filepath.Join(cacheDir, "reports")
 
 	// Find all csproj files (paths always relative to git root for consistent cache keys)
 	projects, err := findProjects(scanRoot, gitRoot)
@@ -264,7 +269,7 @@ func main() {
 			return
 		}
 
-		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, cache, cachePath, forwardGraph, projectsByPath, cachedProjects)
+		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, cache, cachePath, forwardGraph, projectsByPath, cachedProjects, reportsDir)
 		if !success {
 			os.Exit(1)
 		}
@@ -708,7 +713,7 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, cache *Cache, cachePath string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project) bool {
+func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, cache *Cache, cachePath string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -768,6 +773,15 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				projectStart := time.Now()
 				projectPath := filepath.Join(root, p.Path)
 				args := []string{command, projectPath, "--property:WarningLevel=0"}
+
+				// Add TRX logger if reports enabled
+				var trxPath string
+				if !*flagNoReports && command == "test" {
+					os.MkdirAll(reportsDir, 0755)
+					trxPath = filepath.Join(reportsDir, p.Name+".trx")
+					args = append(args, "--logger", "trx;LogFileName="+trxPath)
+				}
+
 				args = append(args, extraArgs...)
 
 				cmd := exec.Command("dotnet", args...)
@@ -790,6 +804,12 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 				err := cmd.Run()
 				duration := time.Since(projectStart)
+
+				// Save console output if reports enabled
+				if !*flagNoReports {
+					consolePath := filepath.Join(reportsDir, p.Name+".log")
+					os.WriteFile(consolePath, output.Bytes(), 0644)
+				}
 
 				select {
 				case <-ctx.Done():
