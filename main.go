@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -78,7 +79,7 @@ var (
 	flagCacheDir    = flag.String("cache-dir", "", "Cache directory path (default: .donotnet in git root)")
 	flagDir         = flag.String("C", "", "Change to directory before running")
 	flagVersion     = flag.Bool("version", false, "Show version and build info")
-	flagParallel    = flag.Int("j", 0, "Number of parallel workers (default: number of projects)")
+	flagParallel    = flag.Int("j", 0, "Number of parallel workers (default: GOMAXPROCS)")
 	flagLocal       = flag.Bool("local", false, "Only scan current directory, not entire git repo")
 	flagKeepGoing   = flag.Bool("k", false, "Keep going on errors (don't stop on first failure)")
 	flagShowCached  = flag.Bool("show-cached", false, "Show cached projects in output")
@@ -1310,9 +1311,19 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Handle Ctrl+C to kill all running processes
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Fprintf(os.Stderr, "\nInterrupted, killing processes...\n")
+		cancel()
+	}()
+	defer signal.Stop(sigChan)
+
 	numWorkers := *flagParallel
 	if numWorkers <= 0 {
-		numWorkers = len(projects)
+		numWorkers = runtime.GOMAXPROCS(0) // default to CPU count
 	}
 	if numWorkers > len(projects) {
 		numWorkers = len(projects)
@@ -1492,7 +1503,12 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 				args = append(args, extraArgs...)
 
-				cmd := exec.Command("dotnet", args...)
+				cmd := exec.CommandContext(ctx, "dotnet", args...)
+				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+				cmd.Cancel = func() error {
+					// Kill the entire process group
+					return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
 
 				// Custom writer that captures output and sends status updates
 				var output bytes.Buffer

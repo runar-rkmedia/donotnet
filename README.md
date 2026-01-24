@@ -29,7 +29,7 @@ On subsequent runs, only projects with changes (or dependencies on changed proje
 ### Example output
 
 ```
-Running test on 15 projects (15 workers)...
+Running test on 15 projects (8 workers)...
   ✓ ⚡ MyProject.Tests                    1.6s  Failed: 0  Passed: 21  Skipped: 4  Total: 25
   ✓ ⚡ MyOtherProject.Tests               1.8s  Failed: 0  Passed: 13  Skipped: 1  Total: 14
   ✓ ⚡ Common.Tests                       1.9s  Failed: 0  Passed: 67  Skipped: 0  Total: 67
@@ -45,7 +45,7 @@ The ⚡ indicator means `--no-build` was auto-detected as safe (build artifacts 
 1. Scans for all `.csproj` files in your git repo
 2. Builds a dependency graph from `<ProjectReference>` entries
 3. Computes a cache key from: git commit + dirty files + command + dotnet args
-4. Runs all affected projects in parallel (one worker per project by default)
+4. Runs affected projects in parallel (defaults to CPU count workers)
 5. Skips projects that already passed with the same cache key
 6. Auto-detects when `--no-build` or `--no-restore` can be safely skipped
 
@@ -55,7 +55,7 @@ The ⚡ indicator means `--no-build` was auto-detected as safe (build artifacts 
 donotnet test                         # Run affected tests
 donotnet -force test                  # Run all tests, ignore cache
 donotnet -watch test                  # Watch mode - rerun on file changes
-donotnet -j 4 test                    # Limit to 4 parallel workers
+donotnet -j 4 test                    # Use 4 parallel workers
 donotnet -k test                      # Keep going on errors (don't stop at first failure)
 donotnet -vcs-changed test            # Only test projects with uncommitted changes
 donotnet -vcs-ref=main test           # Only test projects changed vs main branch
@@ -86,7 +86,7 @@ donotnet -cache-clean=30           # Remove entries older than 30 days
 | `-force`              | Run all projects, ignoring cache                         |
 | `-watch`              | Watch for file changes and rerun                         |
 | `-k`                  | Keep going on errors                                     |
-| `-j N`                | Number of parallel workers (default: number of projects) |
+| `-j N`                | Number of parallel workers (default: CPU count)          |
 | `-v`                  | Verbose output                                           |
 | `-q`                  | Quiet mode                                               |
 | `-C dir`              | Change to directory before running                       |
