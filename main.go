@@ -1284,19 +1284,39 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				}
 
 				if !*flagFullBuild {
-					if !hasNoBuild && canSkipBuild(projectPath) {
-						args = append(args, "--no-build")
-						hasNoBuild = true
-						skippedBuild = true
-						if *flagVerbose {
-							fmt.Fprintf(os.Stderr, "  [%s] skipping build (up-to-date)\n", p.Name)
+					if !hasNoBuild {
+						if canSkipBuild(projectPath) {
+							args = append(args, "--no-build")
+							hasNoBuild = true
+							skippedBuild = true
+							if *flagVerbose {
+								fmt.Fprintf(os.Stderr, "  [%s] skipping build (up-to-date)\n", p.Name)
+							}
+						} else if *flagVerbose {
+							fmt.Fprintf(os.Stderr, "  [%s] cannot skip build: source files newer than DLL\n", p.Name)
 						}
 					}
-					if !hasNoRestore && !hasNoBuild && canSkipRestore(projectPath) {
-						args = append(args, "--no-restore")
-						skippedRestore = true
-						if *flagVerbose {
-							fmt.Fprintf(os.Stderr, "  [%s] skipping restore (up-to-date)\n", p.Name)
+					if !hasNoRestore && !hasNoBuild {
+						if canSkipRestore(projectPath) {
+							args = append(args, "--no-restore")
+							skippedRestore = true
+							if *flagVerbose {
+								fmt.Fprintf(os.Stderr, "  [%s] skipping restore (up-to-date)\n", p.Name)
+							}
+						} else if *flagVerbose {
+							// Log why we couldn't skip restore
+							projectDir := filepath.Dir(projectPath)
+							assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
+							assetsInfo, assetsErr := os.Stat(assetsPath)
+							projectInfo, projErr := os.Stat(projectPath)
+							if assetsErr != nil {
+								fmt.Fprintf(os.Stderr, "  [%s] cannot skip restore: %s not found\n", p.Name, assetsPath)
+							} else if projErr != nil {
+								fmt.Fprintf(os.Stderr, "  [%s] cannot skip restore: cannot stat .csproj\n", p.Name)
+							} else {
+								fmt.Fprintf(os.Stderr, "  [%s] cannot skip restore: assets (%s) older than .csproj (%s)\n",
+									p.Name, assetsInfo.ModTime().Format("15:04:05"), projectInfo.ModTime().Format("15:04:05"))
+							}
 						}
 					}
 				}
@@ -1431,8 +1451,14 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr)
 				}
 
-				// Mark successful immediately (including dependencies)
+				// Touch project.assets.json to ensure mtime is updated for future skip detection
+				// (dotnet doesn't always rewrite it if packages haven't changed)
+				projectPath := filepath.Join(root, r.project.Path)
+				assetsPath := filepath.Join(filepath.Dir(projectPath), "obj", "project.assets.json")
 				now := time.Now()
+				os.Chtimes(assetsPath, now, now)
+
+				// Mark successful immediately (including dependencies)
 				projectsToMark := []*Project{r.project}
 				// Also mark all transitive dependencies
 				for _, depPath := range getTransitiveDependencies(r.project.Path, forwardGraph) {
