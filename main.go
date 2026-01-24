@@ -92,6 +92,8 @@ var (
 	flagForce       = flag.Bool("force", false, "Run all projects, ignoring cache (still updates cache on success)")
 	flagWatch       = flag.Bool("watch", false, "Watch for file changes and rerun affected projects")
 	flagFullBuild   = flag.Bool("full-build", false, "Disable auto --no-build/--no-restore detection")
+	flagPrintOutput = flag.Bool("print-output", false, "Print stdout from all projects (sorted by name) after completion")
+	flagQuiet       = flag.Bool("q", false, "Quiet mode - suppress progress output, only show final results")
 )
 
 func init() {
@@ -392,15 +394,22 @@ func parseCacheKey(key string) (commit, dirtyHash, argsHash, projectPath string)
 
 // cacheEntry represents a cache entry value
 type cacheEntry struct {
-	LastSuccess int64 // Unix timestamp
-	CreatedAt   int64 // Unix timestamp
+	LastSuccess int64  // Unix timestamp
+	CreatedAt   int64  // Unix timestamp
+	Output      []byte // Captured stdout from the run
 }
 
 // encodeCacheEntry encodes a cache entry to bytes
+// Format: [LastSuccess:8][CreatedAt:8][OutputLen:4][Output:OutputLen]
 func encodeCacheEntry(e cacheEntry) []byte {
-	buf := make([]byte, 16)
+	outputLen := len(e.Output)
+	buf := make([]byte, 20+outputLen)
 	binary.LittleEndian.PutUint64(buf[0:8], uint64(e.LastSuccess))
 	binary.LittleEndian.PutUint64(buf[8:16], uint64(e.CreatedAt))
+	binary.LittleEndian.PutUint32(buf[16:20], uint32(outputLen))
+	if outputLen > 0 {
+		copy(buf[20:], e.Output)
+	}
 	return buf
 }
 
@@ -409,15 +418,31 @@ func decodeCacheEntry(data []byte) cacheEntry {
 	if len(data) < 16 {
 		return cacheEntry{}
 	}
-	return cacheEntry{
+	entry := cacheEntry{
 		LastSuccess: int64(binary.LittleEndian.Uint64(data[0:8])),
 		CreatedAt:   int64(binary.LittleEndian.Uint64(data[8:16])),
 	}
+	// Handle old format (16 bytes) and new format (20+ bytes)
+	if len(data) >= 20 {
+		outputLen := binary.LittleEndian.Uint32(data[16:20])
+		if len(data) >= 20+int(outputLen) {
+			// Must copy - bbolt's buffer is only valid during transaction
+			entry.Output = make([]byte, outputLen)
+			copy(entry.Output, data[20:20+outputLen])
+		}
+	}
+	return entry
 }
 
-// lookupCache checks if a cache entry exists and returns the last success time
-func lookupCache(db *bolt.DB, key string) *time.Time {
-	var result *time.Time
+// cacheResult contains the result of a cache lookup
+type cacheResult struct {
+	Time   time.Time
+	Output []byte
+}
+
+// lookupCache checks if a cache entry exists and returns the result
+func lookupCache(db *bolt.DB, key string) *cacheResult {
+	var result *cacheResult
 	db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(cacheBucket))
 		if b == nil {
@@ -428,15 +453,17 @@ func lookupCache(db *bolt.DB, key string) *time.Time {
 			return nil
 		}
 		entry := decodeCacheEntry(data)
-		t := time.Unix(entry.LastSuccess, 0)
-		result = &t
+		result = &cacheResult{
+			Time:   time.Unix(entry.LastSuccess, 0),
+			Output: entry.Output,
+		}
 		return nil
 	})
 	return result
 }
 
 // markCacheSuccess records a successful test/build for the given key
-func markCacheSuccess(db *bolt.DB, key string, t time.Time) error {
+func markCacheSuccess(db *bolt.DB, key string, t time.Time, output []byte) error {
 	return db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(cacheBucket))
 		if b == nil {
@@ -448,6 +475,7 @@ func markCacheSuccess(db *bolt.DB, key string, t time.Time) error {
 		entry := cacheEntry{
 			LastSuccess: t.Unix(),
 			CreatedAt:   t.Unix(),
+			Output:      output,
 		}
 		if existing != nil {
 			old := decodeCacheEntry(existing)
@@ -550,6 +578,12 @@ func main() {
 		if command == "" && (arg == "test" || arg == "build") {
 			command = arg
 		}
+	}
+
+	// Auto-enable quiet mode and print-output for informational commands
+	if shouldAutoQuiet(dotnetArgs) {
+		*flagQuiet = true
+		*flagPrintOutput = true
 	}
 
 	gitRoot, err := findGitRoot()
@@ -664,7 +698,7 @@ func main() {
 			projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
 			dirtyHash := computeDirtyHash(gitRoot, projectDirtyFiles)
 			key := makeCacheKey(commit, dirtyHash, argsHash, p.Path)
-			markCacheSuccess(db, key, now)
+			markCacheSuccess(db, key, now, nil)
 		}
 		if *flagVerbose {
 			fmt.Fprintf(os.Stderr, "Cache updated for %d projects\n", len(projects))
@@ -763,12 +797,35 @@ func main() {
 		}
 
 		if len(targetProjects) == 0 {
-			fmt.Fprintf(os.Stderr, "No affected projects to %s (%d cached)\n", command, len(cachedProjects))
-			// Print all cached projects like a summary
-			for _, p := range cachedProjects {
-				fmt.Fprintf(os.Stderr, "  %s\u25cb%s %s (cached)\n", colorDim, colorReset+colorDim, p.Name)
+			if !*flagQuiet {
+				fmt.Fprintf(os.Stderr, "No affected projects to %s (%d cached)\n", command, len(cachedProjects))
+				// Print all cached projects like a summary
+				for _, p := range cachedProjects {
+					fmt.Fprintf(os.Stderr, "  %s\u25cb%s %s (cached)\n", colorDim, colorReset+colorDim, p.Name)
+				}
+				fmt.Fprintf(os.Stderr, "%s\n%s0/0 succeeded, %d cached%s\n", colorReset, colorGreen, len(cachedProjects), colorReset)
 			}
-			fmt.Fprintf(os.Stderr, "%s\n%s0/0 succeeded, %d cached%s\n", colorReset, colorGreen, len(cachedProjects), colorReset)
+
+			// Print cached outputs if requested
+			if *flagPrintOutput && len(cachedProjects) > 0 {
+				// Sort by name for deterministic output
+				sorted := make([]*Project, len(cachedProjects))
+				copy(sorted, cachedProjects)
+				sort.Slice(sorted, func(i, j int) bool {
+					return sorted[i].Name < sorted[j].Name
+				})
+				fmt.Fprintf(os.Stderr, "\n")
+				for _, p := range sorted {
+					// Look up cached output from bbolt
+					relevantDirs := getProjectRelevantDirs(p, forwardGraph)
+					projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
+					dirtyHash := computeDirtyHash(gitRoot, projectDirtyFiles)
+					key := makeCacheKey(commit, dirtyHash, argsHash, p.Path)
+					if result := lookupCache(db, key); result != nil && len(result.Output) > 0 {
+						fmt.Printf("=== %s ===\n%s\n", p.Name, string(result.Output))
+					}
+				}
+			}
 			return
 		}
 
@@ -1001,7 +1058,14 @@ func projectChanged(db *bolt.DB, p *Project, root, commit string, dirtyFiles []s
 	}
 
 	// Check cache
-	if t := lookupCache(db, key); t != nil {
+	if result := lookupCache(db, key); result != nil {
+		// If --print-output is set, require cached output to exist (only for test projects)
+		if *flagPrintOutput && p.IsTest && len(result.Output) == 0 {
+			if *flagVerbose {
+				fmt.Fprintf(os.Stderr, "  cache miss (no output): %s (key=%s)\n", p.Name, key)
+			}
+			return true // Treat as changed - need to re-run to capture output
+		}
 		if *flagVerbose {
 			fmt.Fprintf(os.Stderr, "  cache hit: %s (key=%s)\n", p.Name, key)
 		}
@@ -1012,6 +1076,24 @@ func projectChanged(db *bolt.DB, p *Project, root, commit string, dirtyFiles []s
 		fmt.Fprintf(os.Stderr, "  cache miss: %s (key=%s)\n", p.Name, key)
 	}
 	return true // Changed - no cache entry
+}
+
+// shouldAutoQuiet returns true if the dotnet args indicate an informational command
+// where the user cares about the output, not the progress
+func shouldAutoQuiet(args []string) bool {
+	infoArgs := map[string]bool{
+		"--list-tests": true, // list available tests
+		"--version":    true, // show version
+		"--help":       true, // show help
+		"-h":           true, // show help (short)
+		"-?":           true, // show help (alt)
+	}
+	for _, arg := range args {
+		if infoArgs[arg] {
+			return true
+		}
+	}
+	return false
 }
 
 func hashArgs(args []string) string {
@@ -1215,10 +1297,12 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		numWorkers = len(projects)
 	}
 
-	if len(cachedProjects) > 0 {
-		fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d cached, %d workers)...\n", command, len(projects), len(cachedProjects), numWorkers)
-	} else {
-		fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d workers)...\n", command, len(projects), numWorkers)
+	if !*flagQuiet {
+		if len(cachedProjects) > 0 {
+			fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d cached, %d workers)...\n", command, len(projects), len(cachedProjects), numWorkers)
+		} else {
+			fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d workers)...\n", command, len(projects), numWorkers)
+		}
 	}
 
 	// Calculate max project name length for alignment
@@ -1457,6 +1541,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	succeeded := 0
 	completed := 0
 	var failures []runResult
+	var allResults []runResult // For --print-output mode
 	directPrinted := make(map[string]bool) // Track which failures were already printed via direct mode
 
 	for completed < len(projects) {
@@ -1480,6 +1565,16 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 		case r := <-results:
 			completed++
+			allResults = append(allResults, r)
+			if *flagQuiet {
+				// In quiet mode, skip progress output
+				if r.success {
+					succeeded++
+				} else {
+					failures = append(failures, r)
+				}
+				continue
+			}
 			clearStatus()
 			stats := extractTestStats(r.output)
 
@@ -1520,19 +1615,22 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				os.Chtimes(assetsPath, now, now)
 
 				// Mark successful immediately (including dependencies)
-				projectsToMark := []*Project{r.project}
-				// Also mark all transitive dependencies
+				// Store output only for the project that ran
+				relevantDirs := getProjectRelevantDirs(r.project, forwardGraph)
+				projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
+				dirtyHash := computeDirtyHash(root, projectDirtyFiles)
+				key := makeCacheKey(commit, dirtyHash, argsHash, r.project.Path)
+				markCacheSuccess(db, key, now, []byte(r.output))
+
+				// Also mark transitive dependencies (without output)
 				for _, depPath := range getTransitiveDependencies(r.project.Path, forwardGraph) {
 					if dep, ok := projectsByPath[depPath]; ok {
-						projectsToMark = append(projectsToMark, dep)
+						depRelevantDirs := getProjectRelevantDirs(dep, forwardGraph)
+						depDirtyFiles := filterFilesToProject(dirtyFiles, depRelevantDirs)
+						depDirtyHash := computeDirtyHash(root, depDirtyFiles)
+						depKey := makeCacheKey(commit, depDirtyHash, argsHash, dep.Path)
+						markCacheSuccess(db, depKey, now, nil)
 					}
-				}
-				for _, mp := range projectsToMark {
-					relevantDirs := getProjectRelevantDirs(mp, forwardGraph)
-					projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
-					dirtyHash := computeDirtyHash(root, projectDirtyFiles)
-					key := makeCacheKey(commit, dirtyHash, argsHash, mp.Path)
-					markCacheSuccess(db, key, now)
 				}
 			} else {
 				failures = append(failures, r)
@@ -1606,6 +1704,46 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorGreen, succeeded, len(projects), colorReset, totalDuration)
 		}
 	}
+
+	// Print all outputs sorted by project name if requested
+	if *flagPrintOutput {
+		// Collect all outputs: ran projects + cached projects
+		type outputEntry struct {
+			name   string
+			output string
+		}
+		var outputs []outputEntry
+
+		// Add outputs from projects that ran
+		for _, r := range allResults {
+			if r.output != "" {
+				outputs = append(outputs, outputEntry{r.project.Name, r.output})
+			}
+		}
+
+		// Add outputs from cached projects (read from bbolt cache)
+		for _, p := range cachedProjects {
+			relevantDirs := getProjectRelevantDirs(p, forwardGraph)
+			projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
+			dirtyHash := computeDirtyHash(root, projectDirtyFiles)
+			key := makeCacheKey(commit, dirtyHash, argsHash, p.Path)
+			if result := lookupCache(db, key); result != nil && len(result.Output) > 0 {
+				outputs = append(outputs, outputEntry{p.Name, string(result.Output)})
+			}
+		}
+
+		if len(outputs) > 0 {
+			// Sort by project name for deterministic output
+			sort.Slice(outputs, func(i, j int) bool {
+				return outputs[i].name < outputs[j].name
+			})
+			fmt.Fprintf(os.Stderr, "\n")
+			for _, o := range outputs {
+				fmt.Printf("=== %s ===\n%s\n", o.name, o.output)
+			}
+		}
+	}
+
 	return len(failures) == 0
 }
 
