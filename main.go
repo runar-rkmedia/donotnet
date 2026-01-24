@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -21,6 +22,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/fsnotify/fsnotify"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -88,6 +90,7 @@ var (
 	flagCacheStats  = flag.Bool("cache-stats", false, "Show cache statistics")
 	flagCacheClean  = flag.Int("cache-clean", -1, "Remove cache entries older than N days (-1 = disabled)")
 	flagForce       = flag.Bool("force", false, "Run all projects, ignoring cache (still updates cache on success)")
+	flagWatch       = flag.Bool("watch", false, "Watch for file changes and rerun affected projects")
 )
 
 func init() {
@@ -121,6 +124,7 @@ Examples:
   donotnet -vcs-changed test        # Test projects with uncommitted changes
   donotnet -vcs-ref=main test       # Test projects changed vs main branch
   donotnet -force test              # Run all tests, ignoring cache
+  donotnet -watch test              # Watch for changes and rerun tests
   donotnet -cache-stats             # Show cache statistics
   donotnet -cache-clean=30          # Remove entries older than 30 days
 `)
@@ -647,6 +651,32 @@ func main() {
 
 	// Handle commands
 	if command != "" {
+		// Watch mode
+		if *flagWatch {
+			// Run initial test/build first
+			if len(targetProjects) > 0 {
+				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir)
+			} else {
+				fmt.Fprintf(os.Stderr, "No affected projects to %s (%d cached)\n", command, len(cachedProjects))
+			}
+
+			// Start watch mode
+			watchCtx := &watchContext{
+				command:        command,
+				dotnetArgs:     dotnetArgs,
+				gitRoot:        gitRoot,
+				db:             db,
+				projects:       projects,
+				graph:          graph,
+				forwardGraph:   forwardGraph,
+				projectsByPath: projectsByPath,
+				reportsDir:     reportsDir,
+				argsHash:       argsHash,
+			}
+			runWatchMode(watchCtx)
+			return
+		}
+
 		if len(targetProjects) == 0 {
 			fmt.Fprintf(os.Stderr, "No affected projects to %s (%d cached)\n", command, len(cachedProjects))
 			// Print all cached projects like a summary
@@ -1345,4 +1375,196 @@ func getTerminalWidth() int {
 	}
 
 	return 80 // Default
+}
+
+// ============================================================================
+// Watch Mode
+// ============================================================================
+
+// watchContext holds all the state needed for watch mode
+type watchContext struct {
+	command        string
+	dotnetArgs     []string
+	gitRoot        string
+	db             *bolt.DB
+	projects       []*Project
+	graph          map[string][]string // reverse dependency graph
+	forwardGraph   map[string][]string
+	projectsByPath map[string]*Project
+	projectsByDir  map[string]*Project // maps directory to project
+	reportsDir     string
+	argsHash       string
+}
+
+// relevantExtensions are file extensions we care about
+var relevantExtensions = map[string]bool{
+	".cs":      true,
+	".csproj":  true,
+	".razor":   true,
+	".props":   true,
+	".targets": true,
+}
+
+func runWatchMode(ctx *watchContext) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating watcher: %v\n", err)
+		os.Exit(1)
+	}
+	defer watcher.Close()
+
+	// Add all project directories to watcher
+	watchedDirs := make(map[string]bool)
+	for _, p := range ctx.projects {
+		projectDir := filepath.Join(ctx.gitRoot, p.Dir)
+		if err := addDirRecursive(watcher, projectDir, watchedDirs); err != nil {
+			if *flagVerbose {
+				fmt.Fprintf(os.Stderr, "warning: failed to watch %s: %v\n", projectDir, err)
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "Watching %d directories for changes (Ctrl+C to stop)...\n", len(watchedDirs))
+
+	// Handle Ctrl+C
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Debounce timer
+	var debounceTimer *time.Timer
+	pendingChanges := make(map[string]bool) // project paths with pending changes
+	var pendingMu sync.Mutex
+
+	runPending := func() {
+		pendingMu.Lock()
+		if len(pendingChanges) == 0 {
+			pendingMu.Unlock()
+			return
+		}
+
+		// Collect affected projects
+		changed := make(map[string]bool)
+		for p := range pendingChanges {
+			changed[p] = true
+		}
+		pendingChanges = make(map[string]bool)
+		pendingMu.Unlock()
+
+		// Find all affected (including dependents)
+		affected := findAffectedProjects(changed, ctx.graph, ctx.projects)
+
+		// Filter to test projects if running test command
+		var targetProjects []*Project
+		for _, p := range ctx.projects {
+			if ctx.command == "test" && !p.IsTest {
+				continue
+			}
+			if affected[p.Path] {
+				targetProjects = append(targetProjects, p)
+			}
+		}
+
+		if len(targetProjects) == 0 {
+			return
+		}
+
+		fmt.Fprintf(os.Stderr, "\n")
+
+		// Get current git state for cache
+		commit := getGitCommit(ctx.gitRoot)
+		dirtyFiles := getGitDirtyFiles(ctx.gitRoot)
+
+		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, commit, dirtyFiles, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir)
+
+		fmt.Fprintf(os.Stderr, "\nWatching for changes...\n")
+	}
+
+	for {
+		select {
+		case <-sigChan:
+			fmt.Fprintf(os.Stderr, "\nStopping watch mode...\n")
+			return
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			// Only care about writes and creates
+			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
+				continue
+			}
+
+			// Check if it's a relevant file
+			ext := strings.ToLower(filepath.Ext(event.Name))
+			if !relevantExtensions[ext] {
+				continue
+			}
+
+			// Find which project this file belongs to
+			relPath, err := filepath.Rel(ctx.gitRoot, event.Name)
+			if err != nil {
+				continue
+			}
+
+			var affectedProject *Project
+			for _, p := range ctx.projects {
+				if strings.HasPrefix(relPath, p.Dir+"/") || strings.HasPrefix(relPath, p.Dir+"\\") {
+					affectedProject = p
+					break
+				}
+			}
+
+			if affectedProject == nil {
+				continue
+			}
+
+			if *flagVerbose {
+				fmt.Fprintf(os.Stderr, "  changed: %s (%s)\n", relPath, affectedProject.Name)
+			}
+
+			pendingMu.Lock()
+			pendingChanges[affectedProject.Path] = true
+			pendingMu.Unlock()
+
+			// Debounce - wait 100ms for more changes before running
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+			debounceTimer = time.AfterFunc(100*time.Millisecond, runPending)
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "watcher error: %v\n", err)
+		}
+	}
+}
+
+func addDirRecursive(watcher *fsnotify.Watcher, dir string, watched map[string]bool) error {
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+
+		name := d.Name()
+		// Skip non-project directories
+		if name == "bin" || name == "obj" || name == ".git" || name == "node_modules" || name == ".vs" {
+			return filepath.SkipDir
+		}
+
+		if watched[path] {
+			return nil
+		}
+
+		if err := watcher.Add(path); err != nil {
+			return err
+		}
+		watched[path] = true
+		return nil
+	})
 }
