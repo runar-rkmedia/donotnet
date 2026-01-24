@@ -685,7 +685,7 @@ func main() {
 	// Get git state
 	commit := getGitCommit(gitRoot)
 	dirtyFiles := getGitDirtyFiles(gitRoot)
-	argsHash := hashArgs(dotnetArgs)
+	argsHash := hashArgs(append([]string{command}, dotnetArgs...)) // include command in hash
 
 	if *flagVerbose {
 		fmt.Fprintf(os.Stderr, "Git commit: %s\n", commit)
@@ -1392,7 +1392,8 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				}
 
 				if !*flagFullBuild {
-					if !hasNoBuild {
+					// --no-build is only valid for test, not build
+					if command == "test" && !hasNoBuild {
 						if canSkipBuild(projectPath) {
 							args = append(args, "--no-build")
 							hasNoBuild = true
