@@ -73,8 +73,7 @@ type Project struct {
 }
 
 var (
-	flagMark        = flag.Bool("mark", false, "Mark current state as successful (update cache)")
-	flagTests       = flag.Bool("tests", false, "Only output test projects")
+	flagTests = flag.Bool("tests", false, "Only output test projects")
 	flagAll         = flag.Bool("all", false, "Output all projects, not just affected")
 	flagVerbose     = flag.Bool("v", false, "Verbose output")
 	flagCacheDir    = flag.String("cache-dir", "", "Cache directory path (default: .donotnet in git root)")
@@ -122,7 +121,6 @@ Examples:
   donotnet build                    # Build affected projects
   donotnet test -- --no-build       # Run tests without building
   donotnet -tests                   # List affected test projects
-  donotnet -mark                    # Manually mark all as successful
   donotnet -C /path/to/repo test    # Run in different directory
   donotnet -vcs-changed test        # Test projects with uncommitted changes
   donotnet -vcs-ref=main test       # Test projects changed vs main branch
@@ -688,22 +686,6 @@ func main() {
 		} else {
 			fmt.Fprintf(os.Stderr, "Working tree clean\n")
 		}
-	}
-
-	if *flagMark {
-		// Update cache with current state for all projects
-		now := time.Now()
-		for _, p := range projects {
-			relevantDirs := getProjectRelevantDirs(p, forwardGraph)
-			projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
-			dirtyHash := computeDirtyHash(gitRoot, projectDirtyFiles)
-			key := makeCacheKey(commit, dirtyHash, argsHash, p.Path)
-			markCacheSuccess(db, key, now, nil)
-		}
-		if *flagVerbose {
-			fmt.Fprintf(os.Stderr, "Cache updated for %d projects\n", len(projects))
-		}
-		return
 	}
 
 	// Determine which projects are changed
