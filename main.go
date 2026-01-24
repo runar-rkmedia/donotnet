@@ -91,6 +91,7 @@ var (
 	flagCacheClean  = flag.Int("cache-clean", -1, "Remove cache entries older than N days (-1 = disabled)")
 	flagForce       = flag.Bool("force", false, "Run all projects, ignoring cache (still updates cache on success)")
 	flagWatch       = flag.Bool("watch", false, "Watch for file changes and rerun affected projects")
+	flagFullBuild   = flag.Bool("full-build", false, "Disable auto --no-build/--no-restore detection")
 )
 
 func init() {
@@ -264,6 +265,89 @@ func filterFilesToProject(files []string, relevantDirs []string) []string {
 		}
 	}
 	return result
+}
+
+// canSkipRestore checks if --no-restore can be safely used
+// Returns true if obj/project.assets.json exists and is newer than the .csproj
+func canSkipRestore(projectPath string) bool {
+	projectDir := filepath.Dir(projectPath)
+	assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
+
+	assetsInfo, err := os.Stat(assetsPath)
+	if err != nil {
+		return false
+	}
+
+	projectInfo, err := os.Stat(projectPath)
+	if err != nil {
+		return false
+	}
+
+	return assetsInfo.ModTime().After(projectInfo.ModTime())
+}
+
+// canSkipBuild checks if --no-build can be safely used
+// Returns true if output DLL exists and is newer than all source files
+func canSkipBuild(projectPath string) bool {
+	projectDir := filepath.Dir(projectPath)
+	projectName := strings.TrimSuffix(filepath.Base(projectPath), ".csproj")
+
+	// Find the output DLL - check common locations
+	var dllInfo os.FileInfo
+
+	// Check bin/Debug and bin/Release with various target frameworks
+	binDir := filepath.Join(projectDir, "bin")
+	filepath.WalkDir(binDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.EqualFold(d.Name(), projectName+".dll") {
+			info, err := d.Info()
+			if err == nil {
+				if dllInfo == nil || info.ModTime().After(dllInfo.ModTime()) {
+					dllInfo = info
+				}
+			}
+		}
+		return nil
+	})
+
+	if dllInfo == nil {
+		return false
+	}
+
+	// Check if any source file is newer than the DLL
+	newerSourceFound := false
+	filepath.WalkDir(projectDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || newerSourceFound {
+			return filepath.SkipAll
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == "bin" || name == "obj" || name == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".cs" && ext != ".csproj" && ext != ".razor" && ext != ".props" && ext != ".targets" {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+
+		if info.ModTime().After(dllInfo.ModTime()) {
+			newerSourceFound = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+
+	return !newerSourceFound
 }
 
 // ============================================================================
@@ -967,10 +1051,12 @@ func findAffectedProjects(changed map[string]bool, graph map[string][]string, pr
 }
 
 type runResult struct {
-	project  *Project
-	success  bool
-	output   string
-	duration time.Duration
+	project        *Project
+	success        bool
+	output         string
+	duration       time.Duration
+	skippedBuild   bool
+	skippedRestore bool
 }
 
 type statusUpdate struct {
@@ -1002,10 +1088,12 @@ var testStatsRegex = regexp.MustCompile(`Failed:\s*(\d+),\s*Passed:\s*(\d+),\s*S
 
 // ANSI color codes
 const (
-	colorReset = "\033[0m"
-	colorRed   = "\033[31m"
-	colorGreen = "\033[32m"
-	colorDim   = "\033[2m"
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorCyan   = "\033[36m"
+	colorDim    = "\033[2m"
 )
 
 func extractTestStats(output string) string {
@@ -1013,7 +1101,42 @@ func extractTestStats(output string) string {
 	if match == nil {
 		return ""
 	}
-	return fmt.Sprintf("Failed: %s, Passed: %s, Skipped: %s, Total: %s", match[1], match[2], match[3], match[4])
+	return formatTestStats(match[1], match[2], match[3], match[4])
+}
+
+func formatTestStats(failed, passed, skipped, total string) string {
+	failedN, _ := strconv.Atoi(failed)
+	passedN, _ := strconv.Atoi(passed)
+	skippedN, _ := strconv.Atoi(skipped)
+	totalN, _ := strconv.Atoi(total)
+
+	// Failed: dim if 0, red otherwise
+	var failedStr string
+	if failedN == 0 {
+		failedStr = fmt.Sprintf("%sFailed: %2s%s", colorDim, failed, colorReset)
+	} else {
+		failedStr = fmt.Sprintf("%sFailed: %2s%s", colorRed, failed, colorReset)
+	}
+
+	// Passed: green if passed+skipped=total (all accounted for)
+	var passedStr string
+	if passedN+skippedN == totalN {
+		passedStr = fmt.Sprintf("%sPassed: %3s%s", colorGreen, passed, colorReset)
+	} else {
+		passedStr = fmt.Sprintf("Passed: %3s", passed)
+	}
+
+	// Skipped: dim if 0, yellow otherwise
+	var skippedStr string
+	if skippedN == 0 {
+		skippedStr = fmt.Sprintf("%sSkipped: %2s%s", colorDim, skipped, colorReset)
+	} else {
+		skippedStr = fmt.Sprintf("%sSkipped: %2s%s", colorYellow, skipped, colorReset)
+	}
+
+	totalStr := fmt.Sprintf("Total: %3s", total)
+
+	return fmt.Sprintf("%s  %s  %s  %s", failedStr, passedStr, skippedStr, totalStr)
 }
 
 func (w *statusLineWriter) Write(p []byte) (n int, err error) {
@@ -1095,10 +1218,18 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d workers)...\n", command, len(projects), numWorkers)
 	}
 
+	// Calculate max project name length for alignment
+	maxNameLen := 0
+	for _, p := range projects {
+		if len(p.Name) > maxNameLen {
+			maxNameLen = len(p.Name)
+		}
+	}
+
 	// Print cached projects at the top if requested
 	if *flagShowCached && len(cachedProjects) > 0 {
 		for _, p := range cachedProjects {
-			fmt.Fprintf(os.Stderr, "  %s\u25cb %s (cached)%s\n", colorDim, p.Name, colorReset)
+			fmt.Fprintf(os.Stderr, "  %s○ %s (cached)%s\n", colorDim, p.Name, colorReset)
 		}
 	}
 
@@ -1137,6 +1268,38 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				projectStart := time.Now()
 				projectPath := filepath.Join(root, p.Path)
 				args := []string{command, projectPath, "--property:WarningLevel=0"}
+
+				// Auto-detect if we can skip restore/build (unless user already specified or disabled)
+				hasNoRestore := false
+				hasNoBuild := false
+				skippedBuild := false
+				skippedRestore := false
+				for _, arg := range extraArgs {
+					if arg == "--no-restore" {
+						hasNoRestore = true
+					}
+					if arg == "--no-build" {
+						hasNoBuild = true
+					}
+				}
+
+				if !*flagFullBuild {
+					if !hasNoBuild && canSkipBuild(projectPath) {
+						args = append(args, "--no-build")
+						hasNoBuild = true
+						skippedBuild = true
+						if *flagVerbose {
+							fmt.Fprintf(os.Stderr, "  [%s] skipping build (up-to-date)\n", p.Name)
+						}
+					}
+					if !hasNoRestore && !hasNoBuild && canSkipRestore(projectPath) {
+						args = append(args, "--no-restore")
+						skippedRestore = true
+						if *flagVerbose {
+							fmt.Fprintf(os.Stderr, "  [%s] skipping restore (up-to-date)\n", p.Name)
+						}
+					}
+				}
 
 				// Add TRX logger if reports enabled
 				var trxPath string
@@ -1178,7 +1341,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				select {
 				case <-ctx.Done():
 					return
-				case results <- runResult{project: p, success: err == nil, output: output.String(), duration: duration}:
+				case results <- runResult{project: p, success: err == nil, output: output.String(), duration: duration, skippedBuild: skippedBuild, skippedRestore: skippedRestore}:
 				}
 			}
 		}()
@@ -1244,12 +1407,28 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			completed++
 			clearStatus()
 			stats := extractTestStats(r.output)
+
+			// Build skip indicator (after checkmark, before name)
+			// Emojis display as 2 chars wide, so use 3 spaces when no indicator
+			var skipIndicator string
+			if r.skippedBuild {
+				skipIndicator = fmt.Sprintf(" %s⚡%s", colorYellow, colorReset)
+			} else if r.skippedRestore {
+				skipIndicator = fmt.Sprintf(" %s↻%s", colorCyan, colorReset)
+			} else {
+				skipIndicator = "   " // three spaces to align with emoji (2-wide) + space
+			}
+
+			// Pad project name and duration for alignment
+			paddedName := fmt.Sprintf("%-*s", maxNameLen, r.project.Name)
+			durationStr := fmt.Sprintf("%7s", r.duration.Round(time.Millisecond))
+
 			if r.success {
 				succeeded++
 				if stats != "" {
-					fmt.Fprintf(os.Stderr, "  %s\u2713%s %s (%s) (%s)\n", colorGreen, colorReset, r.project.Name, r.duration.Round(time.Millisecond), stats)
+					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s  %s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr, stats)
 				} else {
-					fmt.Fprintf(os.Stderr, "  %s\u2713%s %s (%s)\n", colorGreen, colorReset, r.project.Name, r.duration.Round(time.Millisecond))
+					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr)
 				}
 
 				// Mark successful immediately (including dependencies)
@@ -1281,9 +1460,9 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 				// Print failure inline with stats
 				if stats != "" {
-					fmt.Fprintf(os.Stderr, "  %s\u2717%s %s (%s) (%s)\n", colorRed, colorReset, r.project.Name, r.duration.Round(time.Millisecond), stats)
+					fmt.Fprintf(os.Stderr, "  %s✗%s%s %s %s  %s\n", colorRed, colorReset, skipIndicator, paddedName, durationStr, stats)
 				} else {
-					fmt.Fprintf(os.Stderr, "  %s\u2717%s %s (%s)\n", colorRed, colorReset, r.project.Name, r.duration.Round(time.Millisecond))
+					fmt.Fprintf(os.Stderr, "  %s✗%s%s %s %s\n", colorRed, colorReset, skipIndicator, paddedName, durationStr)
 				}
 
 				if !*flagKeepGoing {
@@ -1294,7 +1473,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					cancel() // Stop other goroutines
 					totalDuration := time.Since(startTime).Round(time.Millisecond)
 					if len(cachedProjects) > 0 {
-						fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %d cached (%s)\n", colorRed, succeeded, len(projects), colorReset, len(cachedProjects), totalDuration)
+						fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %s%d cached%s (%s)\n", colorRed, succeeded, len(projects), colorReset, colorCyan, len(cachedProjects), colorReset, totalDuration)
 					} else {
 						fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorRed, succeeded, len(projects), colorReset, totalDuration)
 					}
@@ -1329,13 +1508,13 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 	if len(failures) > 0 {
 		if len(cachedProjects) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %d cached (%s)\n", colorRed, succeeded, len(projects), colorReset, len(cachedProjects), totalDuration)
+			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %s%d cached%s (%s)\n", colorRed, succeeded, len(projects), colorReset, colorCyan, len(cachedProjects), colorReset, totalDuration)
 		} else {
 			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorRed, succeeded, len(projects), colorReset, totalDuration)
 		}
 	} else {
 		if len(cachedProjects) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %d cached (%s)\n", colorGreen, succeeded, len(projects), colorReset, len(cachedProjects), totalDuration)
+			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %s%d cached%s (%s)\n", colorGreen, succeeded, len(projects), colorReset, colorCyan, len(cachedProjects), colorReset, totalDuration)
 		} else {
 			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorGreen, succeeded, len(projects), colorReset, totalDuration)
 		}
