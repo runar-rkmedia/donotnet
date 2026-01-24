@@ -739,7 +739,7 @@ func main() {
 		if *flagWatch {
 			// Run initial test/build first
 			if len(targetProjects) > 0 {
-				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir)
+				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil)
 			} else {
 				fmt.Fprintf(os.Stderr, "No affected projects to %s (%d cached)\n", command, len(cachedProjects))
 			}
@@ -756,6 +756,7 @@ func main() {
 				projectsByPath: projectsByPath,
 				reportsDir:     reportsDir,
 				argsHash:       argsHash,
+				testFilter:     NewTestFilter(),
 			}
 			runWatchMode(watchCtx)
 			return
@@ -771,7 +772,7 @@ func main() {
 			return
 		}
 
-		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir)
+		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil)
 		if !success {
 			os.Exit(1)
 		}
@@ -1057,6 +1058,8 @@ type runResult struct {
 	duration       time.Duration
 	skippedBuild   bool
 	skippedRestore bool
+	filteredTests  bool     // true if only specific tests were run
+	testClasses    []string // test classes that were run (if filtered)
 }
 
 type statusUpdate struct {
@@ -1200,7 +1203,7 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, db *bolt.DB, commit string, dirtyFiles []string, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string) bool {
+func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, db *bolt.DB, commit string, dirtyFiles []string, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1321,6 +1324,58 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					}
 				}
 
+				// Check if we can filter to specific tests (only in test command with testFilter)
+				var filteredTests bool
+				var testClasses []string
+				if command == "test" && testFilter != nil {
+					filterResult := testFilter.GetFilter(p.Path, root)
+					if filterResult.CanFilter {
+						// Check if user already has a --filter arg - if so, combine with AND
+						existingFilterIdx := -1
+						for i, arg := range extraArgs {
+							if arg == "--filter" && i+1 < len(extraArgs) {
+								existingFilterIdx = i + 1
+								break
+							} else if strings.HasPrefix(arg, "--filter=") {
+								existingFilterIdx = i
+								break
+							}
+						}
+						if existingFilterIdx >= 0 {
+							// Combine filters: (our filter) & (user filter)
+							var existingFilter string
+							if strings.HasPrefix(extraArgs[existingFilterIdx], "--filter=") {
+								existingFilter = strings.TrimPrefix(extraArgs[existingFilterIdx], "--filter=")
+							} else {
+								existingFilter = extraArgs[existingFilterIdx]
+							}
+							combinedFilter := fmt.Sprintf("(%s)&(%s)", filterResult.TestFilter, existingFilter)
+							args = append(args, "--filter", combinedFilter)
+							filteredTests = true
+							testClasses = filterResult.TestClasses
+							if *flagVerbose {
+								fmt.Fprintf(os.Stderr, "  [%s] filtering to: %s (combined with user filter)\n", p.Name, strings.Join(testClasses, ", "))
+							}
+							// Remove the original --filter from extraArgs so we don't add it twice
+							if strings.HasPrefix(extraArgs[existingFilterIdx], "--filter=") {
+								extraArgs = append(extraArgs[:existingFilterIdx], extraArgs[existingFilterIdx+1:]...)
+							} else {
+								// Remove both --filter and its value
+								extraArgs = append(extraArgs[:existingFilterIdx-1], extraArgs[existingFilterIdx+1:]...)
+							}
+						} else {
+							args = append(args, "--filter", filterResult.TestFilter)
+							filteredTests = true
+							testClasses = filterResult.TestClasses
+							if *flagVerbose {
+								fmt.Fprintf(os.Stderr, "  [%s] filtering to: %s\n", p.Name, strings.Join(testClasses, ", "))
+							}
+						}
+					} else if *flagVerbose {
+						fmt.Fprintf(os.Stderr, "  [%s] running all tests: %s\n", p.Name, filterResult.Reason)
+					}
+				}
+
 				// Add TRX logger if reports enabled
 				var trxPath string
 				if !*flagNoReports && command == "test" {
@@ -1361,7 +1416,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				select {
 				case <-ctx.Done():
 					return
-				case results <- runResult{project: p, success: err == nil, output: output.String(), duration: duration, skippedBuild: skippedBuild, skippedRestore: skippedRestore}:
+				case results <- runResult{project: p, success: err == nil, output: output.String(), duration: duration, skippedBuild: skippedBuild, skippedRestore: skippedRestore, filteredTests: filteredTests, testClasses: testClasses}:
 				}
 			}
 		}()
@@ -1443,12 +1498,18 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			paddedName := fmt.Sprintf("%-*s", maxNameLen, r.project.Name)
 			durationStr := fmt.Sprintf("%7s", r.duration.Round(time.Millisecond))
 
+			// Add filter info if tests were filtered
+			filterInfo := ""
+			if r.filteredTests && len(r.testClasses) > 0 {
+				filterInfo = fmt.Sprintf("  %s[%s]%s", colorCyan, strings.Join(r.testClasses, ", "), colorReset)
+			}
+
 			if r.success {
 				succeeded++
 				if stats != "" {
-					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s  %s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr, stats)
+					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s  %s%s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr, stats, filterInfo)
 				} else {
-					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr)
+					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s%s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr, filterInfo)
 				}
 
 				// Touch project.assets.json to ensure mtime is updated for future skip detection
@@ -1599,6 +1660,7 @@ type watchContext struct {
 	projectsByDir  map[string]*Project // maps directory to project
 	reportsDir     string
 	argsHash       string
+	testFilter     *TestFilter // tracks changed files for smart test filtering
 }
 
 // relevantExtensions are file extensions we care about
@@ -1640,6 +1702,11 @@ func runWatchMode(ctx *watchContext) {
 	pendingChanges := make(map[string]bool) // project paths with pending changes
 	var pendingMu sync.Mutex
 
+	// Initialize test filter if not already done
+	if ctx.testFilter == nil {
+		ctx.testFilter = NewTestFilter()
+	}
+
 	runPending := func() {
 		pendingMu.Lock()
 		if len(pendingChanges) == 0 {
@@ -1653,6 +1720,10 @@ func runWatchMode(ctx *watchContext) {
 			changed[p] = true
 		}
 		pendingChanges = make(map[string]bool)
+
+		// Copy test filter and clear for next batch
+		testFilter := ctx.testFilter
+		ctx.testFilter = NewTestFilter()
 		pendingMu.Unlock()
 
 		// Find all affected (including dependents)
@@ -1679,7 +1750,7 @@ func runWatchMode(ctx *watchContext) {
 		commit := getGitCommit(ctx.gitRoot)
 		dirtyFiles := getGitDirtyFiles(ctx.gitRoot)
 
-		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, commit, dirtyFiles, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir)
+		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, commit, dirtyFiles, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir, testFilter)
 
 		fmt.Fprintf(os.Stderr, "\nWatching for changes...\n")
 	}
@@ -1730,6 +1801,7 @@ func runWatchMode(ctx *watchContext) {
 
 			pendingMu.Lock()
 			pendingChanges[affectedProject.Path] = true
+			ctx.testFilter.AddChangedFile(affectedProject.Path, relPath)
 			pendingMu.Unlock()
 
 			// Debounce - wait 100ms for more changes before running
