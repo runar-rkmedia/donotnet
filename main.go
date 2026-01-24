@@ -73,9 +73,8 @@ type Project struct {
 }
 
 var (
-	flagTests = flag.Bool("tests", false, "Only output test projects")
-	flagAll         = flag.Bool("all", false, "Output all projects, not just affected")
-	flagVerbose     = flag.Bool("v", false, "Verbose output")
+	flagListAffected = flag.String("list-affected", "", "List affected projects: all, tests, or non-tests")
+	flagVerbose      = flag.Bool("v", false, "Verbose output")
 	flagCacheDir    = flag.String("cache-dir", "", "Cache directory path (default: .donotnet in git root)")
 	flagDir         = flag.String("C", "", "Change to directory before running")
 	flagVersion     = flag.Bool("version", false, "Show version and build info")
@@ -110,7 +109,6 @@ Usage: donotnet [flags] [command] [-- dotnet-args...]
 Commands:
   test      Run 'dotnet test' on affected test projects (auto-marks on success)
   build     Run 'dotnet build' on affected projects (auto-marks on success)
-  (none)    List affected projects
 
 Flags:
 `, versionString())
@@ -120,7 +118,8 @@ Examples:
   donotnet test                     # Run tests on affected projects
   donotnet build                    # Build affected projects
   donotnet test -- --no-build       # Run tests without building
-  donotnet -tests                   # List affected test projects
+  donotnet -list-affected=tests     # List affected test projects
+  donotnet -list-affected=all       # List all affected projects
   donotnet -C /path/to/repo test    # Run in different directory
   donotnet -vcs-changed test        # Test projects with uncommitted changes
   donotnet -vcs-ref=main test       # Test projects changed vs main branch
@@ -557,6 +556,12 @@ func main() {
 		return
 	}
 
+	// Validate -list-affected value
+	if *flagListAffected != "" && *flagListAffected != "all" && *flagListAffected != "tests" && *flagListAffected != "non-tests" {
+		fmt.Fprintf(os.Stderr, "error: -list-affected must be 'all', 'tests', or 'non-tests'\n")
+		os.Exit(1)
+	}
+
 	if *flagDir != "" {
 		if err := os.Chdir(*flagDir); err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot change to directory %s: %v\n", *flagDir, err)
@@ -576,6 +581,12 @@ func main() {
 		if command == "" && (arg == "test" || arg == "build") {
 			command = arg
 		}
+	}
+
+	// Show help if no command and no action flags
+	if command == "" && *flagListAffected == "" && !*flagCacheStats && *flagCacheClean < 0 {
+		flag.Usage()
+		os.Exit(0)
 	}
 
 	// Auto-enable quiet mode and print-output for informational commands
@@ -735,14 +746,18 @@ func main() {
 	var targetProjects []*Project
 	var cachedProjects []*Project
 	for _, p := range projects {
+		// Filter by project type based on command or -list-affected
 		if command == "test" && !p.IsTest {
 			continue
 		}
-		if *flagTests && !p.IsTest {
+		if *flagListAffected == "tests" && !p.IsTest {
 			continue
 		}
-		// Track as cached if not affected (and not using -all)
-		if !*flagAll && !affected[p.Path] {
+		if *flagListAffected == "non-tests" && p.IsTest {
+			continue
+		}
+		// Track as cached if not affected
+		if !affected[p.Path] {
 			cachedProjects = append(cachedProjects, p)
 			continue
 		}
@@ -818,7 +833,31 @@ func main() {
 		return
 	}
 
-	// No command - just list projects
+	// List affected projects (no command, -list-affected was specified)
+	var listType string
+	switch *flagListAffected {
+	case "tests":
+		listType = "test"
+	case "non-tests":
+		listType = "non-test"
+	default:
+		listType = ""
+	}
+
+	if len(targetProjects) == 0 {
+		if listType != "" {
+			fmt.Fprintf(os.Stderr, "No affected %s projects\n", listType)
+		} else {
+			fmt.Fprintf(os.Stderr, "No affected projects\n")
+		}
+		return
+	}
+
+	if listType != "" {
+		fmt.Fprintf(os.Stderr, "Affected %s projects:\n", listType)
+	} else {
+		fmt.Fprintf(os.Stderr, "Affected projects:\n")
+	}
 	for _, p := range targetProjects {
 		fmt.Println(p.Path)
 	}
