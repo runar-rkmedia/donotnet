@@ -566,7 +566,7 @@ func main() {
 	if *flagParseCoverage != "" {
 		report, err := coverage.ParseFile(*flagParseCoverage)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error parsing coverage file: %v\n", err)
+			term.Errorf("parsing coverage file: %v", err)
 			os.Exit(1)
 		}
 
@@ -592,7 +592,7 @@ func main() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(output); err != nil {
-			fmt.Fprintf(os.Stderr, "error encoding JSON: %v\n", err)
+			term.Errorf("encoding JSON: %v", err)
 			os.Exit(1)
 		}
 		return
@@ -600,13 +600,13 @@ func main() {
 
 	// Validate -list-affected value
 	if *flagListAffected != "" && *flagListAffected != "all" && *flagListAffected != "tests" && *flagListAffected != "non-tests" {
-		fmt.Fprintf(os.Stderr, "error: -list-affected must be 'all', 'tests', or 'non-tests'\n")
+		term.Errorf("-list-affected must be 'all', 'tests', or 'non-tests'")
 		os.Exit(1)
 	}
 
 	if *flagDir != "" {
 		if err := os.Chdir(*flagDir); err != nil {
-			fmt.Fprintf(os.Stderr, "error: cannot change to directory %s: %v\n", *flagDir, err)
+			term.Errorf("cannot change to directory %s: %v", *flagDir, err)
 			os.Exit(1)
 		}
 	}
@@ -644,7 +644,7 @@ func main() {
 
 	gitRoot, err := findGitRoot()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		term.Errorf("%v", err)
 		os.Exit(1)
 	}
 
@@ -653,7 +653,7 @@ func main() {
 	if *flagLocal {
 		scanRoot, err = os.Getwd()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			term.Errorf("%v", err)
 			os.Exit(1)
 		}
 	}
@@ -671,7 +671,7 @@ func main() {
 	if *flagCacheStats || *flagCacheClean >= 0 {
 		db, err := openCacheDB(cachePath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error opening cache: %v\n", err)
+			term.Errorf("opening cache: %v", err)
 			os.Exit(1)
 		}
 		defer db.Close()
@@ -680,7 +680,7 @@ func main() {
 			maxAge := time.Duration(*flagCacheClean) * 24 * time.Hour
 			deleted, err := deleteOldEntries(db, maxAge)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "error cleaning cache: %v\n", err)
+				term.Errorf("cleaning cache: %v", err)
 				os.Exit(1)
 			}
 			fmt.Printf("Deleted %d entries older than %d days\n", deleted, *flagCacheClean)
@@ -703,13 +703,13 @@ func main() {
 	// Find all csproj files (paths always relative to git root for consistent cache keys)
 	projects, err := findProjects(scanRoot, gitRoot)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error finding projects: %v\n", err)
+		term.Errorf("finding projects: %v", err)
 		os.Exit(1)
 	}
 
-	if *flagVerbose {
-		fmt.Fprintf(os.Stderr, "Found %d projects\n", len(projects))
-	}
+	// Set verbose mode on terminal
+	term.SetVerbose(*flagVerbose)
+	term.Verbose("Found %d projects", len(projects))
 
 	// Build dependency graphs
 	graph := buildDependencyGraph(projects)
@@ -724,7 +724,7 @@ func main() {
 	// Open cache database
 	db, err := openCacheDB(cachePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error opening cache: %v\n", err)
+		term.Errorf("opening cache: %v", err)
 		os.Exit(1)
 	}
 	defer db.Close()
@@ -734,21 +734,27 @@ func main() {
 	dirtyFiles := getGitDirtyFiles(gitRoot)
 	argsHash := hashArgs(append([]string{command}, dotnetArgs...)) // include command in hash
 
-	if *flagVerbose {
-		fmt.Fprintf(os.Stderr, "Git commit: %s\n", commit)
-		if len(dirtyFiles) > 0 {
-			fmt.Fprintf(os.Stderr, "Dirty files: %d\n", len(dirtyFiles))
-			for _, f := range dirtyFiles {
-				fmt.Fprintf(os.Stderr, "  %s\n", f)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "Working tree clean\n")
+	term.Verbose("Git commit: %s", commit)
+	if len(dirtyFiles) > 0 {
+		term.Verbose("Dirty files: %d", len(dirtyFiles))
+		for _, f := range dirtyFiles {
+			term.Verbose("  %s", f)
 		}
+	} else {
+		term.Verbose("Working tree clean")
 	}
 
 	// Determine which projects are changed
 	var vcsChangedFiles []string
 	useVcsFilter := *flagVcsChanged || *flagVcsRef != ""
+
+	// Default to -vcs-changed behavior when using -list-affected without a VCS filter
+	// This gives more intuitive results (what changed) vs cache-based (what needs to run)
+	if *flagListAffected != "" && !useVcsFilter {
+		useVcsFilter = true
+		*flagVcsChanged = true
+		term.Info("Using uncommitted changes to determine affected projects (use -vcs-ref=<ref> to compare against a branch)")
+	}
 
 	if useVcsFilter {
 		if *flagVcsRef != "" {
@@ -756,35 +762,29 @@ func main() {
 			var err error
 			vcsChangedFiles, err = getGitChangedFiles(gitRoot, *flagVcsRef)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				term.Errorf("%v", err)
 				os.Exit(1)
 			}
 			if len(vcsChangedFiles) == 0 {
-				fmt.Fprintf(os.Stderr, "No changes vs %s\n", *flagVcsRef)
+				term.Dim("No changes vs %s", *flagVcsRef)
 				return
 			}
-			if *flagVerbose {
-				fmt.Fprintf(os.Stderr, "VCS filter: changes vs %s (%d files)\n", *flagVcsRef, len(vcsChangedFiles))
-			}
+			term.Verbose("VCS filter: changes vs %s (%d files)", *flagVcsRef, len(vcsChangedFiles))
 		} else {
 			// Use uncommitted changes (same as dirtyFiles)
 			vcsChangedFiles = dirtyFiles
 			if len(vcsChangedFiles) == 0 {
-				fmt.Fprintf(os.Stderr, "No uncommitted changes\n")
+				term.Dim("No uncommitted changes")
 				return
 			}
-			if *flagVerbose {
-				fmt.Fprintf(os.Stderr, "VCS filter: uncommitted changes (%d files)\n", len(vcsChangedFiles))
-			}
+			term.Verbose("VCS filter: uncommitted changes (%d files)", len(vcsChangedFiles))
 		}
 	}
 
 	// Find changed projects
 	changed := findChangedProjects(db, projects, gitRoot, commit, dirtyFiles, argsHash, forwardGraph, vcsChangedFiles, useVcsFilter)
 
-	if *flagVerbose {
-		fmt.Fprintf(os.Stderr, "Changed projects: %v\n", changed)
-	}
+	term.Verbose("Changed projects: %v", changed)
 
 	// Find affected projects (changed + dependents)
 	affected := findAffectedProjects(changed, graph, projects)
@@ -819,7 +819,7 @@ func main() {
 			if len(targetProjects) > 0 {
 				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil)
 			} else {
-				fmt.Fprintf(os.Stderr, "No affected projects to %s (%d cached)\n", command, len(cachedProjects))
+				term.Dim("No affected projects to %s (%d cached)", command, len(cachedProjects))
 			}
 
 			// Start watch mode
@@ -827,14 +827,14 @@ func main() {
 			var covMap *coverage.Map
 			if command == "test" {
 				covMap = buildCoverageMap(gitRoot, projects)
-				if covMap != nil && *flagVerbose {
-					fmt.Fprintf(os.Stderr, "Coverage map: %d test projects with coverage, %d files mapped\n",
+				if covMap != nil {
+					term.Verbose("Coverage map: %d test projects with coverage, %d files mapped",
 						len(covMap.TestProjectToFiles), len(covMap.FileToTestProjects))
 					if len(covMap.MissingTestProjects) > 0 {
-						fmt.Fprintf(os.Stderr, "  Missing coverage: %d projects\n", len(covMap.MissingTestProjects))
+						term.Verbose("  Missing coverage: %d projects", len(covMap.MissingTestProjects))
 					}
 					if len(covMap.StaleTestProjects) > 0 {
-						fmt.Fprintf(os.Stderr, "  Stale coverage: %d projects\n", len(covMap.StaleTestProjects))
+						term.Verbose("  Stale coverage: %d projects", len(covMap.StaleTestProjects))
 					}
 				}
 			}
@@ -859,12 +859,12 @@ func main() {
 
 		if len(targetProjects) == 0 {
 			if !*flagQuiet {
-				fmt.Fprintf(os.Stderr, "No affected projects to %s (%d cached)\n", command, len(cachedProjects))
+				term.Dim("No affected projects to %s (%d cached)", command, len(cachedProjects))
 				// Print all cached projects like a summary
 				for _, p := range cachedProjects {
-					fmt.Fprintf(os.Stderr, "  %s\u25cb%s %s (cached)\n", colorDim, colorReset+colorDim, p.Name)
+					term.CachedLine(p.Name)
 				}
-				fmt.Fprintf(os.Stderr, "%s\n%s0/0 succeeded, %d cached%s\n", colorReset, colorGreen, len(cachedProjects), colorReset)
+				term.Summary(0, 0, len(cachedProjects), 0, true)
 			}
 
 			// Print cached outputs if requested
@@ -875,7 +875,7 @@ func main() {
 				sort.Slice(sorted, func(i, j int) bool {
 					return sorted[i].Name < sorted[j].Name
 				})
-				fmt.Fprintf(os.Stderr, "\n")
+				term.Println()
 				for _, p := range sorted {
 					// Look up cached output from bbolt
 					relevantDirs := getProjectRelevantDirs(p, forwardGraph)
@@ -910,17 +910,17 @@ func main() {
 
 	if len(targetProjects) == 0 {
 		if listType != "" {
-			fmt.Fprintf(os.Stderr, "No affected %s projects\n", listType)
+			term.Dim("No affected %s projects", listType)
 		} else {
-			fmt.Fprintf(os.Stderr, "No affected projects\n")
+			term.Dim("No affected projects")
 		}
 		return
 	}
 
 	if listType != "" {
-		fmt.Fprintf(os.Stderr, "Affected %s projects:\n", listType)
+		term.Success("Affected %s projects:", listType)
 	} else {
-		fmt.Fprintf(os.Stderr, "Affected projects:\n")
+		term.Success("Affected projects:")
 	}
 	for _, p := range targetProjects {
 		fmt.Println(p.Path)
@@ -966,9 +966,7 @@ func findProjects(scanRoot, gitRoot string) ([]*Project, error) {
 			relPath, _ := filepath.Rel(gitRoot, path)
 			p, err := parseProject(path, relPath)
 			if err != nil {
-				if *flagVerbose {
-					fmt.Fprintf(os.Stderr, "warning: failed to parse %s: %v\n", relPath, err)
-				}
+				term.Verbose("warning: failed to parse %s: %v", relPath, err)
 				return nil
 			}
 			mu.Lock()
@@ -1103,9 +1101,7 @@ func findChangedProjects(db *bolt.DB, projects []*Project, root, commit string, 
 					// No VCS changes for this project, skip entirely
 					return
 				}
-				if *flagVerbose {
-					fmt.Fprintf(os.Stderr, "  vcs candidate: %s (%d files)\n", p.Name, len(projectVcsFiles))
-				}
+				term.Verbose("  vcs candidate: %s (%d files)", p.Name, len(projectVcsFiles))
 				// Fall through to cache check
 			}
 
@@ -1136,9 +1132,7 @@ func projectChanged(db *bolt.DB, p *Project, root, commit string, dirtyFiles []s
 
 	// Skip cache check if force flag is set
 	if *flagForce {
-		if *flagVerbose {
-			fmt.Fprintf(os.Stderr, "  forced: %s (key=%s)\n", p.Name, key)
-		}
+		term.Verbose("  forced: %s (key=%s)", p.Name, key)
 		return true
 	}
 
@@ -1146,20 +1140,14 @@ func projectChanged(db *bolt.DB, p *Project, root, commit string, dirtyFiles []s
 	if result := lookupCache(db, key); result != nil {
 		// If --print-output is set, require cached output to exist (only for test projects)
 		if *flagPrintOutput && p.IsTest && len(result.Output) == 0 {
-			if *flagVerbose {
-				fmt.Fprintf(os.Stderr, "  cache miss (no output): %s (key=%s)\n", p.Name, key)
-			}
+			term.Verbose("  cache miss (no output): %s (key=%s)", p.Name, key)
 			return true // Treat as changed - need to re-run to capture output
 		}
-		if *flagVerbose {
-			fmt.Fprintf(os.Stderr, "  cache hit: %s (key=%s)\n", p.Name, key)
-		}
+		term.Verbose("  cache hit: %s (key=%s)", p.Name, key)
 		return false // Not changed - cache hit
 	}
 
-	if *flagVerbose {
-		fmt.Fprintf(os.Stderr, "  cache miss: %s (key=%s)\n", p.Name, key)
-	}
+	term.Verbose("  cache miss: %s (key=%s)", p.Name, key)
 	return true // Changed - no cache entry
 }
 
@@ -1256,16 +1244,6 @@ var failureRegex = regexp.MustCompile(`Failed:\s*[1-9]\d*[,\s]`) // "Failed: N,"
 // Regex to extract test stats: "Failed: X, Passed: Y, Skipped: Z, Total: N"
 var testStatsRegex = regexp.MustCompile(`Failed:\s*(\d+),\s*Passed:\s*(\d+),\s*Skipped:\s*(\d+),\s*Total:\s*(\d+)`)
 
-// ANSI color codes
-const (
-	colorReset  = "\033[0m"
-	colorRed    = "\033[31m"
-	colorGreen  = "\033[32m"
-	colorYellow = "\033[33m"
-	colorCyan   = "\033[36m"
-	colorDim    = "\033[2m"
-)
-
 func extractTestStats(output string) string {
 	match := testStatsRegex.FindStringSubmatch(output)
 	if match == nil {
@@ -1319,7 +1297,7 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 
 	// In direct mode, just print to stderr
 	if directMode {
-		os.Stderr.Write(p)
+		term.Write(p)
 		return n, nil
 	}
 
@@ -1356,9 +1334,9 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 				if !w.directMode {
 					w.directMode = true
 					// Clear status line and print header
-					fmt.Fprintf(os.Stderr, "\r\033[K  \u2717 %s\n\n", w.project.Name)
+					term.Status("  %s✗%s %s\n\n", colorRed, colorReset, w.project.Name)
 					// Print buffered output
-					os.Stderr.Write(w.buffer.Bytes())
+					term.Write(w.buffer.Bytes())
 					if w.onFailure != nil {
 						w.onFailure()
 					}
@@ -1379,7 +1357,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		fmt.Fprintf(os.Stderr, "\nInterrupted, killing processes...\n")
+		term.Warn("\nInterrupted, killing processes...")
 		cancel()
 	}()
 	defer signal.Stop(sigChan)
@@ -1394,9 +1372,9 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 	if !*flagQuiet {
 		if len(cachedProjects) > 0 {
-			fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d cached, %d workers)...\n", command, len(projects), len(cachedProjects), numWorkers)
+			term.Printf("Running %s on %d projects (%d cached, %d workers)...\n", command, len(projects), len(cachedProjects), numWorkers)
 		} else {
-			fmt.Fprintf(os.Stderr, "Running %s on %d projects (%d workers)...\n", command, len(projects), numWorkers)
+			term.Printf("Running %s on %d projects (%d workers)...\n", command, len(projects), numWorkers)
 		}
 	}
 
@@ -1411,7 +1389,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	// Print cached projects at the top if requested
 	if *flagShowCached && len(cachedProjects) > 0 {
 		for _, p := range cachedProjects {
-			fmt.Fprintf(os.Stderr, "  %s○ %s (cached)%s\n", colorDim, p.Name, colorReset)
+			term.CachedLine(p.Name)
 		}
 	}
 
@@ -1472,32 +1450,28 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 							args = append(args, "--no-build")
 							hasNoBuild = true
 							skippedBuild = true
-							if *flagVerbose {
-								fmt.Fprintf(os.Stderr, "  [%s] skipping build (up-to-date)\n", p.Name)
-							}
-						} else if *flagVerbose {
-							fmt.Fprintf(os.Stderr, "  [%s] cannot skip build: source files newer than DLL\n", p.Name)
+							term.Verbose("  [%s] skipping build (up-to-date)", p.Name)
+						} else {
+							term.Verbose("  [%s] cannot skip build: source files newer than DLL", p.Name)
 						}
 					}
 					if !hasNoRestore && !hasNoBuild {
 						if canSkipRestore(projectPath) {
 							args = append(args, "--no-restore")
 							skippedRestore = true
-							if *flagVerbose {
-								fmt.Fprintf(os.Stderr, "  [%s] skipping restore (up-to-date)\n", p.Name)
-							}
-						} else if *flagVerbose {
+							term.Verbose("  [%s] skipping restore (up-to-date)", p.Name)
+						} else if term.verbose {
 							// Log why we couldn't skip restore
 							projectDir := filepath.Dir(projectPath)
 							assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
 							assetsInfo, assetsErr := os.Stat(assetsPath)
 							projectInfo, projErr := os.Stat(projectPath)
 							if assetsErr != nil {
-								fmt.Fprintf(os.Stderr, "  [%s] cannot skip restore: %s not found\n", p.Name, assetsPath)
+								term.Verbose("  [%s] cannot skip restore: %s not found", p.Name, assetsPath)
 							} else if projErr != nil {
-								fmt.Fprintf(os.Stderr, "  [%s] cannot skip restore: cannot stat .csproj\n", p.Name)
+								term.Verbose("  [%s] cannot skip restore: cannot stat .csproj", p.Name)
 							} else {
-								fmt.Fprintf(os.Stderr, "  [%s] cannot skip restore: assets (%s) older than .csproj (%s)\n",
+								term.Verbose("  [%s] cannot skip restore: assets (%s) older than .csproj (%s)",
 									p.Name, assetsInfo.ModTime().Format("15:04:05"), projectInfo.ModTime().Format("15:04:05"))
 							}
 						}
@@ -1533,9 +1507,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 							args = append(args, "--filter", combinedFilter)
 							filteredTests = true
 							testClasses = filterResult.TestClasses
-							if *flagVerbose {
-								fmt.Fprintf(os.Stderr, "  [%s] filtering to: %s (combined with user filter)\n", p.Name, strings.Join(testClasses, ", "))
-							}
+							term.Verbose("  [%s] filtering to: %s (combined with user filter)", p.Name, strings.Join(testClasses, ", "))
 							// Remove the original --filter from extraArgs so we don't add it twice
 							if strings.HasPrefix(extraArgs[existingFilterIdx], "--filter=") {
 								extraArgs = append(extraArgs[:existingFilterIdx], extraArgs[existingFilterIdx+1:]...)
@@ -1547,12 +1519,10 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 							args = append(args, "--filter", filterResult.TestFilter)
 							filteredTests = true
 							testClasses = filterResult.TestClasses
-							if *flagVerbose {
-								fmt.Fprintf(os.Stderr, "  [%s] filtering to: %s\n", p.Name, strings.Join(testClasses, ", "))
-							}
+							term.Verbose("  [%s] filtering to: %s", p.Name, strings.Join(testClasses, ", "))
 						}
-					} else if *flagVerbose {
-						fmt.Fprintf(os.Stderr, "  [%s] running all tests: %s\n", p.Name, filterResult.Reason)
+					} else {
+						term.Verbose("  [%s] running all tests: %s", p.Name, filterResult.Reason)
 					}
 				}
 
@@ -1614,7 +1584,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	close(jobs)
 
 	clearStatus := func() {
-		fmt.Fprintf(os.Stderr, "\r\033[K")
+		term.ClearLine()
 	}
 
 	showStatus := func(projectName, line string) {
@@ -1627,7 +1597,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		if len(cleanLine) > maxLen && maxLen > 0 {
 			line = line[:min(maxLen, len(line))] + "..."
 		}
-		fmt.Fprintf(os.Stderr, "\r\033[K%s%s", prefix, line)
+		term.Status("%s%s", prefix, line)
 	}
 
 	// Track last status for heartbeat
@@ -1653,7 +1623,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				showStatus(lastProject, lastLine+" ...")
 			} else {
 				elapsed := time.Since(startTime).Round(time.Second)
-				fmt.Fprintf(os.Stderr, "\r\033[K  [%s] waiting...", elapsed)
+				term.Status("  [%s] waiting...", elapsed)
 			}
 			lastMu.Unlock()
 
@@ -1678,17 +1648,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			}
 			clearStatus()
 			stats := extractTestStats(r.output)
-
-			// Build skip indicator (after checkmark, before name)
-			// Emojis display as 2 chars wide, so use 3 spaces when no indicator
-			var skipIndicator string
-			if r.skippedBuild {
-				skipIndicator = fmt.Sprintf(" %s⚡%s", colorYellow, colorReset)
-			} else if r.skippedRestore {
-				skipIndicator = fmt.Sprintf(" %s↻%s", colorCyan, colorReset)
-			} else {
-				skipIndicator = "   " // three spaces to align with emoji (2-wide) + space
-			}
+			skipIndicator := term.SkipIndicator(r.skippedBuild, r.skippedRestore)
 
 			// Pad project name and duration for alignment
 			paddedName := fmt.Sprintf("%-*s", maxNameLen, r.project.Name)
@@ -1702,11 +1662,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 			if r.success {
 				succeeded++
-				if stats != "" {
-					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s  %s%s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr, stats, filterInfo)
-				} else {
-					fmt.Fprintf(os.Stderr, "  %s✓%s%s %s %s%s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr, filterInfo)
-				}
+				term.ResultLine(true, skipIndicator, paddedName, durationStr, stats, filterInfo)
 
 				// Touch project.assets.json to ensure mtime is updated for future skip detection
 				// (dotnet doesn't always rewrite it if packages haven't changed)
@@ -1745,24 +1701,16 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				}
 
 				// Print failure inline with stats
-				if stats != "" {
-					fmt.Fprintf(os.Stderr, "  %s✗%s%s %s %s  %s\n", colorRed, colorReset, skipIndicator, paddedName, durationStr, stats)
-				} else {
-					fmt.Fprintf(os.Stderr, "  %s✗%s%s %s %s\n", colorRed, colorReset, skipIndicator, paddedName, durationStr)
-				}
+				term.ResultLine(false, skipIndicator, paddedName, durationStr, stats, "")
 
 				if !*flagKeepGoing {
 					// Print output if not already printed
 					if !alreadyPrinted {
-						fmt.Fprintf(os.Stderr, "\n%s\n", r.output)
+						term.Printf("\n%s\n", r.output)
 					}
 					cancel() // Stop other goroutines
 					totalDuration := time.Since(startTime).Round(time.Millisecond)
-					if len(cachedProjects) > 0 {
-						fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %s%d cached%s (%s)\n", colorRed, succeeded, len(projects), colorReset, colorCyan, len(cachedProjects), colorReset, totalDuration)
-					} else {
-						fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorRed, succeeded, len(projects), colorReset, totalDuration)
-					}
+					term.Summary(succeeded, len(projects), len(cachedProjects), totalDuration, false)
 					return false
 				}
 			}
@@ -1783,28 +1731,16 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			}
 		}
 		if unprintedFailures > 0 {
-			fmt.Fprintf(os.Stderr, "\n--- Failure Output ---\n")
+			term.Printf("\n--- Failure Output ---\n")
 			for _, f := range failures {
 				if !directPrinted[f.project.Name] {
-					fmt.Fprintf(os.Stderr, "\n=== %s ===\n%s\n", f.project.Name, f.output)
+					term.Printf("\n=== %s ===\n%s\n", f.project.Name, f.output)
 				}
 			}
 		}
 	}
 
-	if len(failures) > 0 {
-		if len(cachedProjects) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %s%d cached%s (%s)\n", colorRed, succeeded, len(projects), colorReset, colorCyan, len(cachedProjects), colorReset, totalDuration)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorRed, succeeded, len(projects), colorReset, totalDuration)
-		}
-	} else {
-		if len(cachedProjects) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s, %s%d cached%s (%s)\n", colorGreen, succeeded, len(projects), colorReset, colorCyan, len(cachedProjects), colorReset, totalDuration)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n%s%d/%d succeeded%s (%s)\n", colorGreen, succeeded, len(projects), colorReset, totalDuration)
-		}
-	}
+	term.Summary(succeeded, len(projects), len(cachedProjects), totalDuration, len(failures) == 0)
 
 	// Print all outputs sorted by project name if requested
 	if *flagPrintOutput {
@@ -1838,7 +1774,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			sort.Slice(outputs, func(i, j int) bool {
 				return outputs[i].name < outputs[j].name
 			})
-			fmt.Fprintf(os.Stderr, "\n")
+			term.Println()
 			for _, o := range outputs {
 				fmt.Printf("=== %s ===\n%s\n", o.name, o.output)
 			}
@@ -1934,7 +1870,7 @@ func buildCoverageMap(gitRoot string, projects []*Project) *coverage.Map {
 func runWatchMode(ctx *watchContext) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating watcher: %v\n", err)
+		term.Errorf("creating watcher: %v", err)
 		os.Exit(1)
 	}
 	defer watcher.Close()
@@ -1944,13 +1880,11 @@ func runWatchMode(ctx *watchContext) {
 	for _, p := range ctx.projects {
 		projectDir := filepath.Join(ctx.gitRoot, p.Dir)
 		if err := addDirRecursive(watcher, projectDir, watchedDirs); err != nil {
-			if *flagVerbose {
-				fmt.Fprintf(os.Stderr, "warning: failed to watch %s: %v\n", projectDir, err)
-			}
+			term.Verbose("warning: failed to watch %s: %v", projectDir, err)
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Watching %d directories for changes (Ctrl+C to stop)...\n", len(watchedDirs))
+	term.Info("Watching %d directories for changes (Ctrl+C to stop)...", len(watchedDirs))
 
 	// Handle Ctrl+C
 	sigChan := make(chan os.Signal, 1)
@@ -2019,13 +1953,11 @@ func runWatchMode(ctx *watchContext) {
 						targetProjects = append(targetProjects, p)
 					}
 				}
-				if *flagVerbose {
-					fmt.Fprintf(os.Stderr, "  coverage-based: %d test projects for %d files\n",
-						len(targetProjects), len(changedFiles))
-				}
-			} else if len(uncoveredFiles) > 0 && *flagVerbose {
+				term.Verbose("  coverage-based: %d test projects for %d files",
+					len(targetProjects), len(changedFiles))
+			} else if len(uncoveredFiles) > 0 {
 				// Some files not in coverage map - will fall back
-				fmt.Fprintf(os.Stderr, "  uncovered files: %v\n", uncoveredFiles)
+				term.Verbose("  uncovered files: %v", uncoveredFiles)
 			}
 		}
 
@@ -2041,8 +1973,8 @@ func runWatchMode(ctx *watchContext) {
 					targetProjects = append(targetProjects, p)
 				}
 			}
-			if *flagVerbose && ctx.coverageMap != nil {
-				fmt.Fprintf(os.Stderr, "  fallback to dependencies: %d projects\n", len(targetProjects))
+			if ctx.coverageMap != nil {
+				term.Verbose("  fallback to dependencies: %d projects", len(targetProjects))
 			}
 		}
 
@@ -2050,7 +1982,7 @@ func runWatchMode(ctx *watchContext) {
 			return
 		}
 
-		fmt.Fprintf(os.Stderr, "\n")
+		term.Println()
 
 		// Get current git state for cache
 		commit := getGitCommit(ctx.gitRoot)
@@ -2058,13 +1990,13 @@ func runWatchMode(ctx *watchContext) {
 
 		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, commit, dirtyFiles, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir, testFilter)
 
-		fmt.Fprintf(os.Stderr, "\nWatching for changes...\n")
+		term.Info("\nWatching for changes...")
 	}
 
 	for {
 		select {
 		case <-sigChan:
-			fmt.Fprintf(os.Stderr, "\nStopping watch mode...\n")
+			term.Dim("\nStopping watch mode...")
 			return
 
 		case event, ok := <-watcher.Events:
@@ -2101,9 +2033,7 @@ func runWatchMode(ctx *watchContext) {
 				continue
 			}
 
-			if *flagVerbose {
-				fmt.Fprintf(os.Stderr, "  changed: %s (%s)\n", relPath, affectedProject.Name)
-			}
+			term.Verbose("  changed: %s (%s)", relPath, affectedProject.Name)
 
 			pendingMu.Lock()
 			pendingChanges[affectedProject.Path] = true
@@ -2121,7 +2051,7 @@ func runWatchMode(ctx *watchContext) {
 			if !ok {
 				return
 			}
-			fmt.Fprintf(os.Stderr, "watcher error: %v\n", err)
+			term.Errorf("watcher: %v", err)
 		}
 	}
 }
