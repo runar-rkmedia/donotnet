@@ -97,6 +97,7 @@ var (
 	flagQuiet         = flag.Bool("q", false, "Quiet mode - suppress progress output, only show final results")
 	flagParseCoverage = flag.String("parse-coverage", "", "Parse a Cobertura coverage XML file and print covered files as JSON")
 	flagCoverage      = flag.Bool("coverage", false, "Collect code coverage during test runs (adds --collect:\"XPlat Code Coverage\")")
+	flagListTests     = flag.Bool("list-tests", false, "List all tests in affected test projects as JSON")
 )
 
 func init() {
@@ -626,7 +627,7 @@ func main() {
 	}
 
 	// Show help if no command and no action flags
-	if command == "" && *flagListAffected == "" && !*flagCacheStats && *flagCacheClean < 0 {
+	if command == "" && *flagListAffected == "" && !*flagCacheStats && *flagCacheClean < 0 && !*flagListTests {
 		flag.Usage()
 		os.Exit(0)
 	}
@@ -809,6 +810,31 @@ func main() {
 			continue
 		}
 		targetProjects = append(targetProjects, p)
+	}
+
+	// Handle -list-tests flag
+	if *flagListTests {
+		// Filter to test projects only
+		var testProjects []*Project
+		for _, p := range targetProjects {
+			if p.IsTest {
+				testProjects = append(testProjects, p)
+			}
+		}
+		if len(testProjects) == 0 {
+			// If no affected, list all test projects
+			for _, p := range projects {
+				if p.IsTest {
+					testProjects = append(testProjects, p)
+				}
+			}
+		}
+		if len(testProjects) == 0 {
+			term.Dim("No test projects found")
+			return
+		}
+		listAllTests(gitRoot, testProjects)
+		return
 	}
 
 	// Handle commands
@@ -1846,6 +1872,85 @@ var relevantExtensions = map[string]bool{
 	".razor":   true,
 	".props":   true,
 	".targets": true,
+}
+
+// TestInfo represents test information for JSON output
+type TestInfo struct {
+	Project string   `json:"project"`
+	Tests   []string `json:"tests"`
+	Count   int      `json:"count"`
+}
+
+// listAllTests runs dotnet test --list-tests on each project and outputs JSON
+func listAllTests(gitRoot string, projects []*Project) {
+	var results []TestInfo
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Regex to detect test names (lines starting with whitespace followed by qualified name)
+	testLineRegex := regexp.MustCompile(`^\s{4}(\S.+)$`)
+
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > len(projects) {
+		numWorkers = len(projects)
+	}
+
+	jobs := make(chan *Project, len(projects))
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range jobs {
+				projectPath := filepath.Join(gitRoot, p.Path)
+				cmd := exec.Command("dotnet", "test", projectPath, "--list-tests", "--no-build")
+				cmd.Dir = gitRoot
+				output, err := cmd.Output()
+				if err != nil {
+					term.Verbose("  [%s] failed to list tests: %v", p.Name, err)
+					continue
+				}
+
+				// Parse output for test names
+				var tests []string
+				inTestList := false
+				for _, line := range strings.Split(string(output), "\n") {
+					if strings.Contains(line, "The following Tests are available:") {
+						inTestList = true
+						continue
+					}
+					if inTestList {
+						if match := testLineRegex.FindStringSubmatch(line); match != nil {
+							tests = append(tests, strings.TrimSpace(match[1]))
+						}
+					}
+				}
+
+				mu.Lock()
+				results = append(results, TestInfo{
+					Project: p.Name,
+					Tests:   tests,
+					Count:   len(tests),
+				})
+				mu.Unlock()
+			}
+		}()
+	}
+
+	for _, p := range projects {
+		jobs <- p
+	}
+	close(jobs)
+	wg.Wait()
+
+	// Sort by project name for consistent output
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Project < results[j].Project
+	})
+
+	// Output JSON
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(results)
 }
 
 // buildCoverageMap builds a coverage map from all test projects
