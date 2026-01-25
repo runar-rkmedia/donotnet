@@ -158,12 +158,17 @@ func NewMap() *Map {
 // Returns empty string if no coverage file is found.
 func FindCoverageFile(testProjectDir string) string {
 	testResultsDir := filepath.Join(testProjectDir, "TestResults")
+	return FindCoverageFileIn(testResultsDir)
+}
 
+// FindCoverageFileIn finds the most recent coverage.cobertura.xml in the given directory.
+// Returns empty string if no coverage file is found.
+func FindCoverageFileIn(dir string) string {
 	var newestFile string
 	var newestTime int64
 
-	// Walk TestResults looking for coverage.cobertura.xml files
-	filepath.WalkDir(testResultsDir, func(path string, d os.DirEntry, err error) error {
+	// Walk directory looking for coverage.cobertura.xml files
+	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // Skip errors
 		}
