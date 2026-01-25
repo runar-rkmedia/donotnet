@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -24,6 +25,7 @@ import (
 	"unsafe"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/runar-rkmedia/donotnet/coverage"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -74,25 +76,27 @@ type Project struct {
 }
 
 var (
-	flagListAffected = flag.String("list-affected", "", "List affected projects: all, tests, or non-tests")
-	flagVerbose      = flag.Bool("v", false, "Verbose output")
-	flagCacheDir    = flag.String("cache-dir", "", "Cache directory path (default: .donotnet in git root)")
-	flagDir         = flag.String("C", "", "Change to directory before running")
-	flagVersion     = flag.Bool("version", false, "Show version and build info")
-	flagParallel    = flag.Int("j", 0, "Number of parallel workers (default: GOMAXPROCS)")
-	flagLocal       = flag.Bool("local", false, "Only scan current directory, not entire git repo")
-	flagKeepGoing   = flag.Bool("k", false, "Keep going on errors (don't stop on first failure)")
-	flagShowCached  = flag.Bool("show-cached", false, "Show cached projects in output")
-	flagNoReports   = flag.Bool("no-reports", false, "Disable saving test reports (TRX and console output)")
-	flagVcsChanged  = flag.Bool("vcs-changed", false, "Only test projects with uncommitted changes")
-	flagVcsRef      = flag.String("vcs-ref", "", "Only test projects changed vs specified ref (e.g., 'main', 'origin/main', 'HEAD~3')")
-	flagCacheStats  = flag.Bool("cache-stats", false, "Show cache statistics")
-	flagCacheClean  = flag.Int("cache-clean", -1, "Remove cache entries older than N days (-1 = disabled)")
-	flagForce       = flag.Bool("force", false, "Run all projects, ignoring cache (still updates cache on success)")
-	flagWatch       = flag.Bool("watch", false, "Watch for file changes and rerun affected projects")
-	flagFullBuild   = flag.Bool("full-build", false, "Disable auto --no-build/--no-restore detection")
-	flagPrintOutput = flag.Bool("print-output", false, "Print stdout from all projects (sorted by name) after completion")
-	flagQuiet       = flag.Bool("q", false, "Quiet mode - suppress progress output, only show final results")
+	flagListAffected  = flag.String("list-affected", "", "List affected projects: all, tests, or non-tests")
+	flagVerbose       = flag.Bool("v", false, "Verbose output")
+	flagCacheDir      = flag.String("cache-dir", "", "Cache directory path (default: .donotnet in git root)")
+	flagDir           = flag.String("C", "", "Change to directory before running")
+	flagVersion       = flag.Bool("version", false, "Show version and build info")
+	flagParallel      = flag.Int("j", 0, "Number of parallel workers (default: GOMAXPROCS)")
+	flagLocal         = flag.Bool("local", false, "Only scan current directory, not entire git repo")
+	flagKeepGoing     = flag.Bool("k", false, "Keep going on errors (don't stop on first failure)")
+	flagShowCached    = flag.Bool("show-cached", false, "Show cached projects in output")
+	flagNoReports     = flag.Bool("no-reports", false, "Disable saving test reports (TRX and console output)")
+	flagVcsChanged    = flag.Bool("vcs-changed", false, "Only test projects with uncommitted changes")
+	flagVcsRef        = flag.String("vcs-ref", "", "Only test projects changed vs specified ref (e.g., 'main', 'origin/main', 'HEAD~3')")
+	flagCacheStats    = flag.Bool("cache-stats", false, "Show cache statistics")
+	flagCacheClean    = flag.Int("cache-clean", -1, "Remove cache entries older than N days (-1 = disabled)")
+	flagForce         = flag.Bool("force", false, "Run all projects, ignoring cache (still updates cache on success)")
+	flagWatch         = flag.Bool("watch", false, "Watch for file changes and rerun affected projects")
+	flagFullBuild     = flag.Bool("full-build", false, "Disable auto --no-build/--no-restore detection")
+	flagPrintOutput   = flag.Bool("print-output", false, "Print stdout from all projects (sorted by name) after completion")
+	flagQuiet         = flag.Bool("q", false, "Quiet mode - suppress progress output, only show final results")
+	flagParseCoverage = flag.String("parse-coverage", "", "Parse a Cobertura coverage XML file and print covered files as JSON")
+	flagCoverage      = flag.Bool("coverage", false, "Collect code coverage during test runs (adds --collect:\"XPlat Code Coverage\")")
 )
 
 func init() {
@@ -126,6 +130,7 @@ Examples:
   donotnet -vcs-ref=main test       # Test projects changed vs main branch
   donotnet -force test              # Run all tests, ignoring cache
   donotnet -watch test              # Watch for changes and rerun tests
+  donotnet -watch -coverage test    # Watch mode with coverage-based selection
   donotnet -cache-stats             # Show cache statistics
   donotnet -cache-clean=30          # Remove entries older than 30 days
 `)
@@ -557,6 +562,42 @@ func main() {
 		return
 	}
 
+	// Handle -parse-coverage flag
+	if *flagParseCoverage != "" {
+		report, err := coverage.ParseFile(*flagParseCoverage)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error parsing coverage file: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Build output structure
+		output := struct {
+			SourceDirs   []string `json:"source_dirs"`
+			CoveredFiles []string `json:"covered_files"`
+			AllFiles     []string `json:"all_files"`
+		}{
+			SourceDirs:   report.SourceDirs,
+			CoveredFiles: make([]string, 0, len(report.CoveredFiles)),
+			AllFiles:     make([]string, 0, len(report.AllFiles)),
+		}
+		for f := range report.CoveredFiles {
+			output.CoveredFiles = append(output.CoveredFiles, f)
+		}
+		for f := range report.AllFiles {
+			output.AllFiles = append(output.AllFiles, f)
+		}
+		sort.Strings(output.CoveredFiles)
+		sort.Strings(output.AllFiles)
+
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(output); err != nil {
+			fmt.Fprintf(os.Stderr, "error encoding JSON: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Validate -list-affected value
 	if *flagListAffected != "" && *flagListAffected != "all" && *flagListAffected != "tests" && *flagListAffected != "non-tests" {
 		fmt.Fprintf(os.Stderr, "error: -list-affected must be 'all', 'tests', or 'non-tests'\n")
@@ -588,6 +629,11 @@ func main() {
 	if command == "" && *flagListAffected == "" && !*flagCacheStats && *flagCacheClean < 0 {
 		flag.Usage()
 		os.Exit(0)
+	}
+
+	// Add coverage collection if --coverage flag is set
+	if *flagCoverage && command == "test" {
+		dotnetArgs = append(dotnetArgs, "--collect:XPlat Code Coverage")
 	}
 
 	// Auto-enable quiet mode and print-output for informational commands
@@ -777,6 +823,22 @@ func main() {
 			}
 
 			// Start watch mode
+			// Build coverage map for test projects
+			var covMap *coverage.Map
+			if command == "test" {
+				covMap = buildCoverageMap(gitRoot, projects)
+				if covMap != nil && *flagVerbose {
+					fmt.Fprintf(os.Stderr, "Coverage map: %d test projects with coverage, %d files mapped\n",
+						len(covMap.TestProjectToFiles), len(covMap.FileToTestProjects))
+					if len(covMap.MissingTestProjects) > 0 {
+						fmt.Fprintf(os.Stderr, "  Missing coverage: %d projects\n", len(covMap.MissingTestProjects))
+					}
+					if len(covMap.StaleTestProjects) > 0 {
+						fmt.Fprintf(os.Stderr, "  Stale coverage: %d projects\n", len(covMap.StaleTestProjects))
+					}
+				}
+			}
+
 			watchCtx := &watchContext{
 				command:        command,
 				dotnetArgs:     dotnetArgs,
@@ -789,6 +851,7 @@ func main() {
 				reportsDir:     reportsDir,
 				argsHash:       argsHash,
 				testFilter:     NewTestFilter(),
+				coverageMap:    covMap,
 			}
 			runWatchMode(watchCtx)
 			return
@@ -1836,7 +1899,8 @@ type watchContext struct {
 	projectsByDir  map[string]*Project // maps directory to project
 	reportsDir     string
 	argsHash       string
-	testFilter     *TestFilter // tracks changed files for smart test filtering
+	testFilter     *TestFilter    // tracks changed files for smart test filtering
+	coverageMap    *coverage.Map  // maps source files to test projects that cover them
 }
 
 // relevantExtensions are file extensions we care about
@@ -1846,6 +1910,25 @@ var relevantExtensions = map[string]bool{
 	".razor":   true,
 	".props":   true,
 	".targets": true,
+}
+
+// buildCoverageMap builds a coverage map from all test projects
+func buildCoverageMap(gitRoot string, projects []*Project) *coverage.Map {
+	var testProjects []coverage.TestProject
+	for _, p := range projects {
+		if p.IsTest {
+			testProjects = append(testProjects, coverage.TestProject{
+				Path: p.Path,
+				Dir:  p.Dir,
+			})
+		}
+	}
+
+	if len(testProjects) == 0 {
+		return nil
+	}
+
+	return coverage.BuildMap(gitRoot, testProjects)
 }
 
 func runWatchMode(ctx *watchContext) {
@@ -1875,7 +1958,8 @@ func runWatchMode(ctx *watchContext) {
 
 	// Debounce timer
 	var debounceTimer *time.Timer
-	pendingChanges := make(map[string]bool) // project paths with pending changes
+	pendingChanges := make(map[string]bool)   // project paths with pending changes
+	pendingFiles := make(map[string]struct{}) // changed file paths (relative to gitRoot)
 	var pendingMu sync.Mutex
 
 	// Initialize test filter if not already done
@@ -1885,34 +1969,80 @@ func runWatchMode(ctx *watchContext) {
 
 	runPending := func() {
 		pendingMu.Lock()
-		if len(pendingChanges) == 0 {
+		if len(pendingChanges) == 0 && len(pendingFiles) == 0 {
 			pendingMu.Unlock()
 			return
 		}
 
-		// Collect affected projects
-		changed := make(map[string]bool)
+		// Collect changed projects and files
+		changedProjects := make(map[string]bool)
 		for p := range pendingChanges {
-			changed[p] = true
+			changedProjects[p] = true
+		}
+		changedFiles := make([]string, 0, len(pendingFiles))
+		for f := range pendingFiles {
+			changedFiles = append(changedFiles, f)
 		}
 		pendingChanges = make(map[string]bool)
+		pendingFiles = make(map[string]struct{})
 
 		// Copy test filter and clear for next batch
 		testFilter := ctx.testFilter
 		ctx.testFilter = NewTestFilter()
 		pendingMu.Unlock()
 
-		// Find all affected (including dependents)
-		affected := findAffectedProjects(changed, ctx.graph, ctx.projects)
-
-		// Filter to test projects if running test command
+		// Determine target test projects using coverage map or fallback
 		var targetProjects []*Project
-		for _, p := range ctx.projects {
-			if ctx.command == "test" && !p.IsTest {
-				continue
+		usedCoverage := false
+
+		if ctx.command == "test" && ctx.coverageMap != nil && ctx.coverageMap.HasCoverage() {
+			// Try coverage-based selection
+			coveredTestProjects := make(map[string]bool)
+			uncoveredFiles := []string{}
+
+			for _, f := range changedFiles {
+				testProjs := ctx.coverageMap.GetTestProjectsForFile(f)
+				if len(testProjs) > 0 {
+					for _, tp := range testProjs {
+						coveredTestProjects[tp] = true
+					}
+				} else {
+					uncoveredFiles = append(uncoveredFiles, f)
+				}
 			}
-			if affected[p.Path] {
-				targetProjects = append(targetProjects, p)
+
+			if len(uncoveredFiles) == 0 && len(coveredTestProjects) > 0 {
+				// All files are covered - use coverage-based selection
+				usedCoverage = true
+				for _, p := range ctx.projects {
+					if coveredTestProjects[p.Path] {
+						targetProjects = append(targetProjects, p)
+					}
+				}
+				if *flagVerbose {
+					fmt.Fprintf(os.Stderr, "  coverage-based: %d test projects for %d files\n",
+						len(targetProjects), len(changedFiles))
+				}
+			} else if len(uncoveredFiles) > 0 && *flagVerbose {
+				// Some files not in coverage map - will fall back
+				fmt.Fprintf(os.Stderr, "  uncovered files: %v\n", uncoveredFiles)
+			}
+		}
+
+		if !usedCoverage {
+			// Fallback: use dependency-based selection
+			affected := findAffectedProjects(changedProjects, ctx.graph, ctx.projects)
+
+			for _, p := range ctx.projects {
+				if ctx.command == "test" && !p.IsTest {
+					continue
+				}
+				if affected[p.Path] {
+					targetProjects = append(targetProjects, p)
+				}
+			}
+			if *flagVerbose && ctx.coverageMap != nil {
+				fmt.Fprintf(os.Stderr, "  fallback to dependencies: %d projects\n", len(targetProjects))
 			}
 		}
 
@@ -1977,6 +2107,7 @@ func runWatchMode(ctx *watchContext) {
 
 			pendingMu.Lock()
 			pendingChanges[affectedProject.Path] = true
+			pendingFiles[relPath] = struct{}{}
 			ctx.testFilter.AddChangedFile(affectedProject.Path, relPath)
 			pendingMu.Unlock()
 
