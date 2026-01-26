@@ -12,6 +12,8 @@ import (
 type TestFilter struct {
 	// ChangedFiles maps project path -> list of changed file paths (relative to git root)
 	ChangedFiles map[string][]string
+	// CoverageMaps maps project name -> per-test coverage map (for coverage-based filtering)
+	CoverageMaps map[string]*TestCoverageMap
 }
 
 // NewTestFilter creates a new TestFilter
@@ -43,6 +45,11 @@ type FilterResult struct {
 	TestClasses []string
 }
 
+// SetCoverageMaps sets the per-test coverage maps for coverage-based filtering
+func (tf *TestFilter) SetCoverageMaps(maps map[string]*TestCoverageMap) {
+	tf.CoverageMaps = maps
+}
+
 // GetFilter analyzes changed files for a project and returns a filter if possible
 func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult {
 	files, ok := tf.ChangedFiles[projectPath]
@@ -55,18 +62,21 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 
 	// Check each changed file
 	var testClasses []string
+	var nonTestFiles []string
 	for _, file := range files {
-		class, ok := tf.analyzeFile(file, gitRoot)
-		if !ok {
-			// This file prevents filtering - run all tests
-			return FilterResult{
-				CanFilter: false,
-				Reason:    fmt.Sprintf("non-test file changed: %s", filepath.Base(file)),
+		class, isTest := tf.analyzeFile(file, gitRoot)
+		if isTest {
+			if class != "" {
+				testClasses = append(testClasses, class)
 			}
+		} else {
+			nonTestFiles = append(nonTestFiles, file)
 		}
-		if class != "" {
-			testClasses = append(testClasses, class)
-		}
+	}
+
+	// If we have non-test files, try coverage-based filtering
+	if len(nonTestFiles) > 0 {
+		return tf.getFilterWithCoverage(projectPath, nonTestFiles, testClasses)
 	}
 
 	if len(testClasses) == 0 {
@@ -92,6 +102,73 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 		TestFilter:  filter,
 		Reason:      fmt.Sprintf("only test files changed: %s", strings.Join(testClasses, ", ")),
 		TestClasses: testClasses,
+	}
+}
+
+// getFilterWithCoverage attempts to build a filter using per-test coverage data
+func (tf *TestFilter) getFilterWithCoverage(projectPath string, nonTestFiles []string, testClasses []string) FilterResult {
+	// Get project name from path (e.g., "tests/Foo.Tests/Foo.Tests.csproj" -> "Foo.Tests")
+	projectName := strings.TrimSuffix(filepath.Base(projectPath), ".csproj")
+
+	covMap, ok := tf.CoverageMaps[projectName]
+	if !ok || covMap == nil {
+		return FilterResult{
+			CanFilter: false,
+			Reason:    fmt.Sprintf("no coverage data for %s, non-test file changed: %s", projectName, filepath.Base(nonTestFiles[0])),
+		}
+	}
+
+	// Collect tests that cover any of the changed files
+	testsToRun := make(map[string]bool)
+	var uncoveredFiles []string
+
+	for _, file := range nonTestFiles {
+		// Normalize path separators
+		normalizedFile := filepath.ToSlash(file)
+		tests, covered := covMap.FileToTests[normalizedFile]
+		if !covered || len(tests) == 0 {
+			uncoveredFiles = append(uncoveredFiles, filepath.Base(file))
+		} else {
+			for _, t := range tests {
+				testsToRun[t] = true
+			}
+		}
+	}
+
+	// If any files are not in coverage data, fall back to running all tests
+	if len(uncoveredFiles) > 0 {
+		return FilterResult{
+			CanFilter: false,
+			Reason:    fmt.Sprintf("file(s) not in coverage: %s", strings.Join(uncoveredFiles, ", ")),
+		}
+	}
+
+	// Add test classes from test file changes
+	for _, class := range testClasses {
+		testsToRun[class] = true
+	}
+
+	if len(testsToRun) == 0 {
+		return FilterResult{
+			CanFilter: false,
+			Reason:    "no tests cover the changed files",
+		}
+	}
+
+	// Build filter expression using FullyQualifiedName=
+	var filterParts []string
+	var testNames []string
+	for test := range testsToRun {
+		testNames = append(testNames, test)
+		filterParts = append(filterParts, fmt.Sprintf("FullyQualifiedName~%s", test))
+	}
+	filter := strings.Join(filterParts, "|")
+
+	return FilterResult{
+		CanFilter:   true,
+		TestFilter:  filter,
+		Reason:      fmt.Sprintf("coverage-based: %d test(s) for %d file(s)", len(testsToRun), len(nonTestFiles)),
+		TestClasses: testNames,
 	}
 }
 

@@ -884,19 +884,29 @@ func main() {
 				}
 			}
 
+			// Load per-test coverage maps for test filtering
+			testCovMaps := loadAllTestCoverageMaps(gitRoot)
+			if len(testCovMaps) > 0 {
+				term.Verbose("Loaded per-test coverage for %d project(s)", len(testCovMaps))
+			}
+
+			testFilter := NewTestFilter()
+			testFilter.SetCoverageMaps(testCovMaps)
+
 			watchCtx := &watchContext{
-				command:        command,
-				dotnetArgs:     dotnetArgs,
-				gitRoot:        gitRoot,
-				db:             db,
-				projects:       projects,
-				graph:          graph,
-				forwardGraph:   forwardGraph,
-				projectsByPath: projectsByPath,
-				reportsDir:     reportsDir,
-				argsHash:       argsHash,
-				testFilter:     NewTestFilter(),
-				coverageMap:    covMap,
+				command:          command,
+				dotnetArgs:       dotnetArgs,
+				gitRoot:          gitRoot,
+				db:               db,
+				projects:         projects,
+				graph:            graph,
+				forwardGraph:     forwardGraph,
+				projectsByPath:   projectsByPath,
+				reportsDir:       reportsDir,
+				argsHash:         argsHash,
+				testFilter:       testFilter,
+				coverageMap:      covMap,
+				testCoverageMaps: testCovMaps,
 			}
 			runWatchMode(watchCtx)
 			return
@@ -1869,19 +1879,20 @@ func getTerminalWidth() int {
 
 // watchContext holds all the state needed for watch mode
 type watchContext struct {
-	command        string
-	dotnetArgs     []string
-	gitRoot        string
-	db             *bolt.DB
-	projects       []*Project
-	graph          map[string][]string // reverse dependency graph
-	forwardGraph   map[string][]string
-	projectsByPath map[string]*Project
-	projectsByDir  map[string]*Project // maps directory to project
-	reportsDir     string
-	argsHash       string
-	testFilter     *TestFilter    // tracks changed files for smart test filtering
-	coverageMap    *coverage.Map  // maps source files to test projects that cover them
+	command          string
+	dotnetArgs       []string
+	gitRoot          string
+	db               *bolt.DB
+	projects         []*Project
+	graph            map[string][]string // reverse dependency graph
+	forwardGraph     map[string][]string
+	projectsByPath   map[string]*Project
+	projectsByDir    map[string]*Project // maps directory to project
+	reportsDir       string
+	argsHash         string
+	testFilter       *TestFilter                  // tracks changed files for smart test filtering
+	coverageMap      *coverage.Map                // maps source files to test projects that cover them
+	testCoverageMaps map[string]*TestCoverageMap  // per-test coverage maps for test filtering
 }
 
 // relevantExtensions are file extensions we care about
@@ -1936,6 +1947,41 @@ func saveTestCoverageMap(path string, m *TestCoverageMap) error {
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	return enc.Encode(m)
+}
+
+// loadAllTestCoverageMaps loads all .testcoverage.json files from the cache directory
+// Returns a map of project name -> coverage map
+func loadAllTestCoverageMaps(gitRoot string) map[string]*TestCoverageMap {
+	cacheDir := filepath.Join(gitRoot, ".donotnet")
+	result := make(map[string]*TestCoverageMap)
+
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return result // Return empty map if directory doesn't exist
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".testcoverage.json") {
+			continue
+		}
+
+		path := filepath.Join(cacheDir, name)
+		covMap, err := loadTestCoverageMap(path)
+		if err != nil {
+			term.Verbose("  failed to load %s: %v", name, err)
+			continue
+		}
+
+		// Extract project name from filename (e.g., "Foo.Tests.testcoverage.json" -> "Foo.Tests")
+		projectName := strings.TrimSuffix(name, ".testcoverage.json")
+		result[projectName] = covMap
+	}
+
+	return result
 }
 
 // hasCoverletCollector checks if a project has the coverlet.collector package
@@ -2366,6 +2412,7 @@ func runWatchMode(ctx *watchContext) {
 	// Initialize test filter if not already done
 	if ctx.testFilter == nil {
 		ctx.testFilter = NewTestFilter()
+		ctx.testFilter.SetCoverageMaps(ctx.testCoverageMaps)
 	}
 
 	runPending := func() {
@@ -2387,9 +2434,10 @@ func runWatchMode(ctx *watchContext) {
 		pendingChanges = make(map[string]bool)
 		pendingFiles = make(map[string]struct{})
 
-		// Copy test filter and clear for next batch
+		// Copy test filter and clear for next batch (preserving coverage maps)
 		testFilter := ctx.testFilter
 		ctx.testFilter = NewTestFilter()
+		ctx.testFilter.SetCoverageMaps(ctx.testCoverageMaps)
 		pendingMu.Unlock()
 
 		// Determine target test projects using coverage map or fallback
