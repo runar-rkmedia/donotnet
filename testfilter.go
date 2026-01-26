@@ -16,13 +16,21 @@ type TestFilter struct {
 	AllChangedFiles []string
 	// CoverageMaps maps project name -> per-test coverage map (for coverage-based filtering)
 	CoverageMaps map[string]*TestCoverageMap
+	// Heuristics is the list of enabled heuristics for fallback filtering
+	Heuristics []TestHeuristic
 }
 
-// NewTestFilter creates a new TestFilter
+// NewTestFilter creates a new TestFilter with default heuristics enabled
 func NewTestFilter() *TestFilter {
 	return &TestFilter{
 		ChangedFiles: make(map[string][]string),
+		Heuristics:   AvailableHeuristics, // All enabled by default
 	}
+}
+
+// SetHeuristics sets the enabled heuristics for fallback filtering
+func (tf *TestFilter) SetHeuristics(heuristics []TestHeuristic) {
+	tf.Heuristics = heuristics
 }
 
 // AddChangedFile records a changed file for a project
@@ -62,10 +70,18 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 		if result.CanFilter {
 			return result
 		}
-		// If coverage lookup found no tests or file not covered, continue to heuristics
+		// If coverage lookup found no tests or file not covered, try heuristics
 	}
 
-	// Fall back to heuristic-based filtering using per-project changed files
+	// Try heuristic-based filtering using all changed files
+	if len(tf.AllChangedFiles) > 0 {
+		result := tf.getFilterWithHeuristics(tf.AllChangedFiles, gitRoot)
+		if result.CanFilter {
+			return result
+		}
+	}
+
+	// Final fallback for test-file-only changes (legacy behavior)
 	files, ok := tf.ChangedFiles[projectPath]
 	if !ok || len(files) == 0 {
 		return FilterResult{
@@ -88,7 +104,7 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 		}
 	}
 
-	// If we have non-test files and no coverage data, can't filter
+	// If we have non-test files, can't filter without coverage or heuristics
 	if len(nonTestFiles) > 0 {
 		return FilterResult{
 			CanFilter: false,
@@ -119,6 +135,114 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 		TestFilter:  filter,
 		Reason:      fmt.Sprintf("only test files changed: %s", strings.Join(testClasses, ", ")),
 		TestClasses: testClasses,
+	}
+}
+
+// getFilterWithHeuristics uses naming conventions to guess which tests to run
+// Based on analysis: ~79% of files follow Foo.cs -> FooTests pattern
+func (tf *TestFilter) getFilterWithHeuristics(changedFiles []string, gitRoot string) FilterResult {
+	// If no heuristics are enabled, return early
+	if len(tf.Heuristics) == 0 {
+		return FilterResult{
+			CanFilter: false,
+			Reason:    "heuristics disabled",
+		}
+	}
+
+	testsToRun := make(map[string]bool)
+	var nonCsFiles []string
+	var usedHeuristics []string
+
+	for _, file := range changedFiles {
+		fileName := filepath.Base(file)
+		ext := strings.ToLower(filepath.Ext(fileName))
+
+		// Skip non-.cs files - they could be .csproj, .razor, etc.
+		if ext != ".cs" {
+			nonCsFiles = append(nonCsFiles, fileName)
+			continue
+		}
+
+		nameWithoutExt := strings.TrimSuffix(fileName, ext)
+
+		// If this is already a test file, add it directly
+		if strings.HasSuffix(nameWithoutExt, "Tests") || strings.HasSuffix(nameWithoutExt, "Test") {
+			testsToRun[nameWithoutExt] = true
+			continue
+		}
+
+		// Check if this file contains test attributes (might be a test file with non-standard name)
+		fullPath := filepath.Join(gitRoot, file)
+		if isTestOnlyFile(fullPath) {
+			testsToRun[nameWithoutExt] = true
+			continue
+		}
+
+		// Get parent directory name for heuristics
+		dirName := ""
+		dir := filepath.Dir(file)
+		if dir != "." {
+			parts := strings.Split(filepath.ToSlash(dir), "/")
+			for i := len(parts) - 1; i >= 0; i-- {
+				d := parts[i]
+				if d != "" && d != "Source" && d != "src" && !strings.HasSuffix(d, ".csproj") {
+					dirName = d
+					break
+				}
+			}
+		}
+
+		// Apply each enabled heuristic
+		for _, h := range tf.Heuristics {
+			patterns := h.Apply(nameWithoutExt, dirName)
+			for _, p := range patterns {
+				if p != "" {
+					testsToRun[p] = true
+					// Track which heuristics were used (for verbose output)
+					found := false
+					for _, u := range usedHeuristics {
+						if u == h.Name {
+							found = true
+							break
+						}
+					}
+					if !found {
+						usedHeuristics = append(usedHeuristics, h.Name)
+					}
+				}
+			}
+		}
+	}
+
+	// If there are non-.cs files, we can't safely use heuristics
+	if len(nonCsFiles) > 0 {
+		return FilterResult{
+			CanFilter: false,
+			Reason:    fmt.Sprintf("non-.cs file changed: %s", nonCsFiles[0]),
+		}
+	}
+
+	if len(testsToRun) == 0 {
+		return FilterResult{
+			CanFilter: false,
+			Reason:    "no heuristic matches found",
+		}
+	}
+
+	// Build filter expression
+	var filterParts []string
+	var testNames []string
+	for test := range testsToRun {
+		testNames = append(testNames, test)
+		filterParts = append(filterParts, fmt.Sprintf("FullyQualifiedName~%s", test))
+	}
+	filter := strings.Join(filterParts, "|")
+
+	return FilterResult{
+		CanFilter:   true,
+		TestFilter:  filter,
+		Reason:      fmt.Sprintf("heuristic [%s]: %d pattern(s) for %d file(s)", strings.Join(usedHeuristics, ","), len(testsToRun), len(changedFiles)),
+		TestClasses: testNames,
 	}
 }
 
@@ -236,6 +360,135 @@ func (tf *TestFilter) analyzeFile(filePath string, gitRoot string) (string, bool
 // Regex to find test attributes in C# code
 var testAttributeRegex = regexp.MustCompile(`\[(Test|Fact|Theory|TestMethod|TestCase)\b`)
 var classRegex = regexp.MustCompile(`\bclass\s+(\w+)`)
+
+// TestHeuristic defines a named heuristic for guessing test names from source files
+type TestHeuristic struct {
+	Name        string // Short identifier (e.g., "NameToNameTests")
+	Description string // Human-readable description
+	// Apply returns test patterns to match for a given source file
+	// fileName is without extension, dirName is the immediate parent directory
+	Apply func(fileName, dirName string) []string
+}
+
+// AvailableHeuristics lists all available test-filtering heuristics
+// The first two are enabled by default, the rest are opt-in
+var AvailableHeuristics = []TestHeuristic{
+	// Default heuristics (enabled with "all")
+	{
+		Name:        "NameToNameTests",
+		Description: "Foo.cs -> FooTests (direct name match, ~79% accurate)",
+		Apply: func(fileName, dirName string) []string {
+			return []string{fileName + "Tests"}
+		},
+	},
+	{
+		Name:        "DirToNamespace",
+		Description: "Cache/Foo.cs -> .Cache.FooTests (directory as namespace)",
+		Apply: func(fileName, dirName string) []string {
+			if dirName != "" && dirName != "Source" && dirName != "src" {
+				return []string{"." + dirName + "." + fileName}
+			}
+			return nil
+		},
+	},
+}
+
+// OptInHeuristics are additional heuristics that must be explicitly enabled
+var OptInHeuristics = []TestHeuristic{
+	{
+		Name:        "ExtensionsToBase",
+		Description: "FooExtensions.cs -> FooTests (extension methods with base class)",
+		Apply: func(fileName, dirName string) []string {
+			if strings.HasSuffix(fileName, "Extensions") {
+				base := strings.TrimSuffix(fileName, "Extensions")
+				return []string{base + "Tests"}
+			}
+			return nil
+		},
+	},
+	{
+		Name:        "InterfaceToImpl",
+		Description: "IFoo.cs -> FooTests (interface to implementation tests)",
+		Apply: func(fileName, dirName string) []string {
+			if strings.HasPrefix(fileName, "I") && len(fileName) > 1 {
+				// Check if second char is uppercase (IFoo, not "Internal")
+				if len(fileName) > 1 && fileName[1] >= 'A' && fileName[1] <= 'Z' {
+					impl := fileName[1:] // Strip leading "I"
+					return []string{impl + "Tests"}
+				}
+			}
+			return nil
+		},
+	},
+	{
+		Name:        "AlwaysCompositionRoot",
+		Description: "Any .cs -> CompositionRootTests (DI container tests)",
+		Apply: func(fileName, dirName string) []string {
+			return []string{"CompositionRootTests"}
+		},
+	},
+}
+
+// DefaultHeuristics returns the names of heuristics enabled by default
+func DefaultHeuristics() []string {
+	return []string{"NameToNameTests", "DirToNamespace"}
+}
+
+// AllHeuristics returns all heuristics (default + opt-in)
+func AllHeuristics() []TestHeuristic {
+	all := make([]TestHeuristic, 0, len(AvailableHeuristics)+len(OptInHeuristics))
+	all = append(all, AvailableHeuristics...)
+	all = append(all, OptInHeuristics...)
+	return all
+}
+
+// ParseHeuristics parses a comma-separated list of heuristic names
+// Returns the enabled heuristics.
+//   - "default" = default heuristics only
+//   - "none" = no heuristics
+//   - "default,ExtensionsToBase" = defaults + specific opt-in
+//   - "NameToNameTests,InterfaceToImpl" = only specified ones
+func ParseHeuristics(spec string) []TestHeuristic {
+	if spec == "" || spec == "default" {
+		return AvailableHeuristics
+	}
+	if spec == "none" {
+		return nil
+	}
+
+	// Build lookup of all heuristics
+	allByName := make(map[string]TestHeuristic)
+	for _, h := range AvailableHeuristics {
+		allByName[h.Name] = h
+	}
+	for _, h := range OptInHeuristics {
+		allByName[h.Name] = h
+	}
+
+	var result []TestHeuristic
+	seen := make(map[string]bool)
+
+	for _, name := range strings.Split(spec, ",") {
+		name = strings.TrimSpace(name)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		if name == "default" {
+			// Add all default heuristics
+			for _, h := range AvailableHeuristics {
+				if !seen[h.Name] {
+					seen[h.Name] = true
+					result = append(result, h)
+				}
+			}
+		} else if h, ok := allByName[name]; ok {
+			result = append(result, h)
+		}
+	}
+	return result
+}
 
 // isTestOnlyFile checks if a file contains only test classes (has test attributes)
 // This is a heuristic - if the file has test attributes, we assume it's a test file

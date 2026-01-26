@@ -99,6 +99,8 @@ var (
 	flagCoverage      = flag.Bool("coverage", false, "Collect code coverage during test runs (adds --collect:\"XPlat Code Coverage\")")
 	flagListTests          = flag.Bool("list-tests", false, "List all tests in affected test projects as JSON")
 	flagBuildTestCoverage  = flag.Bool("build-test-coverage", false, "Build per-test coverage map for test projects (slow, runs each test individually)")
+	flagHeuristics         = flag.String("heuristics", "default", "Test filter heuristics: default, none, or comma-separated names (use -list-heuristics to see options)")
+	flagListHeuristics     = flag.Bool("list-heuristics", false, "List available test filter heuristics")
 )
 
 func init() {
@@ -600,6 +602,24 @@ func main() {
 		return
 	}
 
+	// Handle -list-heuristics flag
+	if *flagListHeuristics {
+		fmt.Fprintf(os.Stderr, "%sDefault heuristics%s (enabled with -heuristics=default):\n\n", colorCyan, colorReset)
+		for _, h := range AvailableHeuristics {
+			fmt.Fprintf(os.Stderr, "  %s%-20s%s %s%s%s\n", colorGreen, h.Name, colorReset, colorDim, h.Description, colorReset)
+		}
+		fmt.Fprintf(os.Stderr, "\n%sOpt-in heuristics%s (must be explicitly enabled):\n\n", colorCyan, colorReset)
+		for _, h := range OptInHeuristics {
+			fmt.Fprintf(os.Stderr, "  %s%-20s%s %s%s%s\n", colorYellow, h.Name, colorReset, colorDim, h.Description, colorReset)
+		}
+		fmt.Fprintf(os.Stderr, "\n%sUsage:%s\n", colorDim, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s                     Default heuristics only\n", colorGreen, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%snone%s                        Disable all heuristics\n", colorRed, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s,%sExtensionsToBase%s    Defaults + specific opt-in\n", colorGreen, colorReset, colorYellow, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%sNameToNameTests%s             Only specific heuristics\n", colorGreen, colorReset)
+		return
+	}
+
 	// Handle -build-test-coverage flag (needs gitRoot and projects, handled later)
 
 	// Validate -list-affected value
@@ -892,6 +912,7 @@ func main() {
 
 			testFilter := NewTestFilter()
 			testFilter.SetCoverageMaps(testCovMaps)
+			testFilter.SetHeuristics(ParseHeuristics(*flagHeuristics))
 
 			watchCtx := &watchContext{
 				command:          command,
@@ -2415,6 +2436,7 @@ func runWatchMode(ctx *watchContext) {
 	if ctx.testFilter == nil {
 		ctx.testFilter = NewTestFilter()
 		ctx.testFilter.SetCoverageMaps(ctx.testCoverageMaps)
+		ctx.testFilter.SetHeuristics(ParseHeuristics(*flagHeuristics))
 	}
 
 	runPending := func() {
@@ -2436,10 +2458,11 @@ func runWatchMode(ctx *watchContext) {
 		pendingChanges = make(map[string]bool)
 		pendingFiles = make(map[string]struct{})
 
-		// Copy test filter and clear for next batch (preserving coverage maps)
+		// Copy test filter and clear for next batch (preserving coverage maps and heuristics)
 		testFilter := ctx.testFilter
 		ctx.testFilter = NewTestFilter()
 		ctx.testFilter.SetCoverageMaps(ctx.testCoverageMaps)
+		ctx.testFilter.SetHeuristics(ParseHeuristics(*flagHeuristics))
 		pendingMu.Unlock()
 
 		// Determine target test projects using coverage map or fallback
