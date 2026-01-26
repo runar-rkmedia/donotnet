@@ -447,6 +447,7 @@ func AllHeuristics() []TestHeuristic {
 //   - "default" = default heuristics only
 //   - "none" = no heuristics
 //   - "default,ExtensionsToBase" = defaults + specific opt-in
+//   - "default,-DirToNamespace" = defaults minus specific one
 //   - "NameToNameTests,InterfaceToImpl" = only specified ones
 func ParseHeuristics(spec string) []TestHeuristic {
 	if spec == "" || spec == "default" {
@@ -465,20 +466,38 @@ func ParseHeuristics(spec string) []TestHeuristic {
 		allByName[h.Name] = h
 	}
 
-	var result []TestHeuristic
-	seen := make(map[string]bool)
+	// First pass: collect additions and removals
+	var additions []string
+	disabled := make(map[string]bool)
 
 	for _, name := range strings.Split(spec, ",") {
 		name = strings.TrimSpace(name)
-		if seen[name] {
+		if name == "" {
+			continue
+		}
+
+		if strings.HasPrefix(name, "-") {
+			// Disable this heuristic
+			disabled[name[1:]] = true
+		} else {
+			additions = append(additions, name)
+		}
+	}
+
+	// Second pass: build result
+	var result []TestHeuristic
+	seen := make(map[string]bool)
+
+	for _, name := range additions {
+		if seen[name] || disabled[name] {
 			continue
 		}
 		seen[name] = true
 
 		if name == "default" {
-			// Add all default heuristics
+			// Add all default heuristics (unless disabled)
 			for _, h := range AvailableHeuristics {
-				if !seen[h.Name] {
+				if !seen[h.Name] && !disabled[h.Name] {
 					seen[h.Name] = true
 					result = append(result, h)
 				}

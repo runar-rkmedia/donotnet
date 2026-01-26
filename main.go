@@ -613,10 +613,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "  %s%-20s%s %s%s%s\n", colorYellow, h.Name, colorReset, colorDim, h.Description, colorReset)
 		}
 		fmt.Fprintf(os.Stderr, "\n%sUsage:%s\n", colorDim, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s                     Default heuristics only\n", colorGreen, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%snone%s                        Disable all heuristics\n", colorRed, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s,%sExtensionsToBase%s    Defaults + specific opt-in\n", colorGreen, colorReset, colorYellow, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%sNameToNameTests%s             Only specific heuristics\n", colorGreen, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s                      Default heuristics only\n", colorGreen, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%snone%s                         Disable all heuristics\n", colorRed, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s,%sExtensionsToBase%s     Defaults + specific opt-in\n", colorGreen, colorReset, colorYellow, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s,%s-DirToNamespace%s      Defaults minus specific one\n", colorGreen, colorReset, colorRed, colorReset)
+		fmt.Fprintf(os.Stderr, "  -heuristics=%sNameToNameTests%s              Only specific heuristics\n", colorGreen, colorReset)
 		return
 	}
 

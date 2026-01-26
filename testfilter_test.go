@@ -175,6 +175,32 @@ func TestParseHeuristics(t *testing.T) {
 	if len(h) != expectedCount {
 		t.Errorf("expected %d heuristics, got %d", expectedCount, len(h))
 	}
+
+	// Test disabling a default heuristic
+	h = ParseHeuristics("default,-DirToNamespace")
+	expectedCount = len(AvailableHeuristics) - 1
+	if len(h) != expectedCount {
+		t.Errorf("expected %d heuristics for 'default,-DirToNamespace', got %d", expectedCount, len(h))
+	}
+	// Verify DirToNamespace is not in the result
+	for _, heuristic := range h {
+		if heuristic.Name == "DirToNamespace" {
+			t.Error("DirToNamespace should have been disabled")
+		}
+	}
+
+	// Test disabling multiple
+	h = ParseHeuristics("default,-NameToNameTests,-DirToNamespace")
+	if len(h) != 0 {
+		t.Errorf("expected 0 heuristics when all defaults disabled, got %d", len(h))
+	}
+
+	// Test adding opt-in while disabling default
+	h = ParseHeuristics("default,-DirToNamespace,ExtensionsToBase")
+	expectedCount = len(AvailableHeuristics) - 1 + 1 // minus DirToNamespace, plus ExtensionsToBase
+	if len(h) != expectedCount {
+		t.Errorf("expected %d heuristics, got %d", expectedCount, len(h))
+	}
 }
 
 func TestHeuristic_ExtensionsToBase(t *testing.T) {
