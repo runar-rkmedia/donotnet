@@ -261,7 +261,7 @@ func (t *Terminal) SkipIndicator(skippedBuild, skippedRestore bool) string {
 	} else if skippedRestore {
 		return fmt.Sprintf(" %s↻%s", colorCyan, colorReset)
 	}
-	return "   " // three spaces to align with emoji (2-wide) + space
+	return "  " // two spaces to align with " ↻" (space + emoji)
 }
 
 // term is the global terminal instance

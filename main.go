@@ -105,6 +105,7 @@ var (
 	flagListHeuristics     = flag.Bool("list-heuristics", false, "List available test filter heuristics")
 	flagFailed             = flag.Bool("failed", false, "Only run projects that failed in the previous run")
 	flagDumpCache          = flag.String("dump-cache", "", "Dump cached output for a project (by name or path)")
+	flagDevPlan            = flag.Bool("dev-plan", false, "Show job scheduling plan based on dependencies and exit")
 )
 
 func init() {
@@ -1892,6 +1893,12 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		numWorkers = len(projects)
 	}
 
+	// Handle --dev-plan: show scheduling plan and exit
+	if *flagDevPlan {
+		printSchedulingPlan(projects, forwardGraph)
+		return true
+	}
+
 	if !*flagQuiet {
 		// Build status line
 		var parts []string
@@ -2124,27 +2131,93 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 				err := cmd.Run()
 				duration := time.Since(projectStart)
+				outputStr := output.String()
+
+				// Check if we need to retry with restore
+				// This happens when we skipped restore but packages are missing from cache
+				if err != nil && skippedRestore && needsRestoreRetry(outputStr) {
+					term.Verbose("  [%s] retrying with restore (missing NuGet packages)", p.Name)
+
+					// Rebuild args without --no-restore
+					retryArgs := make([]string, 0, len(args))
+					for _, arg := range args {
+						if arg != "--no-restore" {
+							retryArgs = append(retryArgs, arg)
+						}
+					}
+
+					// Run again with restore
+					output.Reset()
+					projectStart = time.Now()
+					retryCmd := exec.CommandContext(ctx, "dotnet", retryArgs...)
+					setupProcessGroup(retryCmd)
+					retryCmd.Stdout = lineWriter
+					retryCmd.Stderr = lineWriter
+					retryCmd.Dir = root
+					retryCmd.Env = cmd.Env
+
+					err = retryCmd.Run()
+					duration = time.Since(projectStart)
+					outputStr = output.String()
+					skippedRestore = false // We did restore this time
+				}
 
 				// Save console output if reports enabled
 				if !*flagNoReports {
 					consolePath := filepath.Join(reportsDir, p.Name+".log")
-					os.WriteFile(consolePath, output.Bytes(), 0644)
+					os.WriteFile(consolePath, []byte(outputStr), 0644)
 				}
 
 				select {
 				case <-ctx.Done():
 					return
-				case results <- runResult{project: p, success: err == nil, output: output.String(), duration: duration, skippedBuild: skippedBuild, skippedRestore: skippedRestore, filteredTests: filteredTests, testClasses: testClasses}:
+				case results <- runResult{project: p, success: err == nil, output: outputStr, duration: duration, skippedBuild: skippedBuild, skippedRestore: skippedRestore, filteredTests: filteredTests, testClasses: testClasses}:
 				}
 			}
 		}()
 	}
 
-	// Send jobs
+	// Build dependency tracking for projects in target set
+	// This prevents parallel build conflicts where both a project and its dependency
+	// try to build the same files simultaneously
+	targetSet := make(map[string]bool)
 	for _, p := range projects {
-		jobs <- p
+		targetSet[p.Path] = true
 	}
-	close(jobs)
+
+	// For each project, track which deps in target set are still incomplete
+	pendingDeps := make(map[string]map[string]bool) // project -> set of pending dep paths
+	for _, p := range projects {
+		deps := make(map[string]bool)
+		for _, depPath := range forwardGraph[p.Path] {
+			if targetSet[depPath] {
+				deps[depPath] = true
+			}
+		}
+		pendingDeps[p.Path] = deps
+	}
+
+	// Split into ready (no pending deps) and pending projects
+	pending := make(map[string]*Project)
+	jobsSent := 0
+	for _, p := range projects {
+		if len(pendingDeps[p.Path]) == 0 {
+			jobs <- p
+			jobsSent++
+		} else {
+			pending[p.Path] = p
+		}
+	}
+
+	// Close jobs channel only when all jobs have been sent
+	jobsClosed := false
+	closeJobsIfDone := func() {
+		if !jobsClosed && jobsSent == len(projects) {
+			close(jobs)
+			jobsClosed = true
+		}
+	}
+	closeJobsIfDone() // In case all projects were ready initially
 
 	clearStatus := func() {
 		term.ClearLine()
@@ -2212,6 +2285,16 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				} else {
 					failures = append(failures, r)
 				}
+				// Unblock projects waiting on this one
+				for path, p := range pending {
+					delete(pendingDeps[path], r.project.Path)
+					if len(pendingDeps[path]) == 0 {
+						delete(pending, path)
+						jobs <- p
+						jobsSent++
+					}
+				}
+				closeJobsIfDone()
 				continue
 			}
 			clearStatus()
@@ -2289,6 +2372,17 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					return false
 				}
 			}
+
+			// Unblock projects waiting on this one
+			for path, p := range pending {
+				delete(pendingDeps[path], r.project.Path)
+				if len(pendingDeps[path]) == 0 {
+					delete(pending, path)
+					jobs <- p
+					jobsSent++
+				}
+			}
+			closeJobsIfDone()
 		case <-ctx.Done():
 			return false
 		}
@@ -2356,6 +2450,26 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	}
 
 	return len(failures) == 0
+}
+
+// needsRestoreRetry checks if a build failure is due to missing NuGet packages
+// This happens when we optimistically skipped restore but packages aren't in cache
+func needsRestoreRetry(output string) bool {
+	// Common patterns indicating missing NuGet packages
+	patterns := []string{
+		"could not be found",                    // CS0006: Metadata file '...' could not be found
+		"are you missing an assembly reference", // CS0234/CS0246
+		"Run a NuGet package restore",           // NU1101 type errors
+		"assets file.*doesn't have a target",    // Assets file issue
+	}
+
+	outputLower := strings.ToLower(output)
+	for _, pattern := range patterns {
+		if strings.Contains(outputLower, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	return false
 }
 
 // looksLikeDotnetFlag returns true if the arg looks like a dotnet test/build flag
@@ -2476,6 +2590,89 @@ func stripAnsi(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
 
+// printSchedulingPlan shows how jobs would be scheduled based on dependencies
+func printSchedulingPlan(projects []*Project, forwardGraph map[string][]string) {
+	// Build target set
+	targetSet := make(map[string]bool)
+	for _, p := range projects {
+		targetSet[p.Path] = true
+	}
+
+	// For each project, find deps within target set
+	pendingDeps := make(map[string][]string)
+	for _, p := range projects {
+		var deps []string
+		for _, depPath := range forwardGraph[p.Path] {
+			if targetSet[depPath] {
+				deps = append(deps, depPath)
+			}
+		}
+		pendingDeps[p.Path] = deps
+	}
+
+	// Simulate scheduling waves
+	completed := make(map[string]bool)
+	wave := 1
+
+	// Color helpers
+	bold := "\033[1m"
+	if term.IsPlain() {
+		bold = ""
+	}
+
+	fmt.Printf("%s%sJob Scheduling Plan%s (%d projects)\n", bold, colorCyan, colorReset, len(projects))
+	fmt.Println(strings.Repeat("─", 50))
+	fmt.Printf("%sWaves show dependency order. In practice, projects start\nas soon as their dependencies complete, not in strict waves.%s\n", colorDim, colorReset)
+
+	for len(completed) < len(projects) {
+		// Find ready projects (all deps completed)
+		var ready []*Project
+		for _, p := range projects {
+			if completed[p.Path] {
+				continue
+			}
+			isReady := true
+			for _, dep := range pendingDeps[p.Path] {
+				if !completed[dep] {
+					isReady = false
+					break
+				}
+			}
+			if isReady {
+				ready = append(ready, p)
+			}
+		}
+
+		if len(ready) == 0 {
+			fmt.Printf("\n%sERROR:%s Circular dependency detected!\n", colorRed, colorReset)
+			for _, p := range projects {
+				if !completed[p.Path] {
+					fmt.Printf("  %sStuck:%s %s (waiting on: %v)\n", colorRed, colorReset, p.Name, pendingDeps[p.Path])
+				}
+			}
+			break
+		}
+
+		fmt.Printf("\n%s%sWave %d%s %s(%d projects, can run in parallel)%s\n", bold, colorGreen, wave, colorReset, colorDim, len(ready), colorReset)
+		for _, p := range ready {
+			deps := pendingDeps[p.Path]
+			if len(deps) == 0 {
+				fmt.Printf("  %s•%s %s\n", colorGreen, colorReset, p.Name)
+			} else {
+				// Show which deps this was waiting on
+				var depNames []string
+				for _, dep := range deps {
+					depNames = append(depNames, filepath.Base(filepath.Dir(dep)))
+				}
+				fmt.Printf("  %s•%s %s %s(after: %s)%s\n", colorYellow, colorReset, p.Name, colorDim, strings.Join(depNames, ", "), colorReset)
+			}
+			completed[p.Path] = true
+		}
+		wave++
+	}
+
+	fmt.Println()
+}
 
 // ============================================================================
 // Watch Mode
