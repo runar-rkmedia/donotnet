@@ -96,6 +96,8 @@ var (
 	flagFullBuild     = flag.Bool("full-build", false, "Disable auto --no-build/--no-restore detection")
 	flagPrintOutput   = flag.Bool("print-output", false, "Print stdout from all projects (sorted by name) after completion")
 	flagQuiet         = flag.Bool("q", false, "Quiet mode - suppress progress output, only show final results")
+	flagColor         = flag.String("color", "auto", "Color output mode: auto, always, never")
+	flagNoProgress    = flag.Bool("no-progress", false, "Disable progress output (default when not a TTY)")
 	flagParseCoverage = flag.String("parse-coverage", "", "Parse a Cobertura coverage XML file and print covered files as JSON")
 	flagCoverage      = flag.Bool("coverage", false, "Collect code coverage during test runs (adds --collect:\"XPlat Code Coverage\")")
 	flagListTests          = flag.Bool("list-tests", false, "List all tests in affected test projects as JSON")
@@ -739,7 +741,7 @@ func main() {
 	flag.Parse()
 
 	if *flagVersion {
-		fmt.Println(versionString())
+		term.Println(versionString())
 		return
 	}
 
@@ -781,20 +783,22 @@ func main() {
 
 	// Handle -list-heuristics flag
 	if *flagListHeuristics {
-		fmt.Fprintf(os.Stderr, "%sDefault heuristics%s (enabled with -heuristics=default):\n\n", colorCyan, colorReset)
+		c, r, g, y, d := term.Color(colorCyan), term.Color(colorReset), term.Color(colorGreen), term.Color(colorYellow), term.Color(colorDim)
+		red := term.Color(colorRed)
+		term.Printf("%sDefault heuristics%s (enabled with -heuristics=default):\n\n", c, r)
 		for _, h := range AvailableHeuristics {
-			fmt.Fprintf(os.Stderr, "  %s%-20s%s %s%s%s\n", colorGreen, h.Name, colorReset, colorDim, h.Description, colorReset)
+			term.Printf("  %s%-20s%s %s%s%s\n", g, h.Name, r, d, h.Description, r)
 		}
-		fmt.Fprintf(os.Stderr, "\n%sOpt-in heuristics%s (must be explicitly enabled):\n\n", colorCyan, colorReset)
+		term.Printf("\n%sOpt-in heuristics%s (must be explicitly enabled):\n\n", c, r)
 		for _, h := range OptInHeuristics {
-			fmt.Fprintf(os.Stderr, "  %s%-20s%s %s%s%s\n", colorYellow, h.Name, colorReset, colorDim, h.Description, colorReset)
+			term.Printf("  %s%-20s%s %s%s%s\n", y, h.Name, r, d, h.Description, r)
 		}
-		fmt.Fprintf(os.Stderr, "\n%sUsage:%s\n", colorDim, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s                      Default heuristics only\n", colorGreen, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%snone%s                         Disable all heuristics\n", colorRed, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s,%sExtensionsToBase%s     Defaults + specific opt-in\n", colorGreen, colorReset, colorYellow, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%sdefault%s,%s-DirToNamespace%s      Defaults minus specific one\n", colorGreen, colorReset, colorRed, colorReset)
-		fmt.Fprintf(os.Stderr, "  -heuristics=%sNameToNameTests%s              Only specific heuristics\n", colorGreen, colorReset)
+		term.Printf("\n%sUsage:%s\n", d, r)
+		term.Printf("  -heuristics=%sdefault%s                      Default heuristics only\n", g, r)
+		term.Printf("  -heuristics=%snone%s                         Disable all heuristics\n", red, r)
+		term.Printf("  -heuristics=%sdefault%s,%sExtensionsToBase%s     Defaults + specific opt-in\n", g, r, y, r)
+		term.Printf("  -heuristics=%sdefault%s,%s-DirToNamespace%s      Defaults minus specific one\n", g, r, red, r)
+		term.Printf("  -heuristics=%sNameToNameTests%s              Only specific heuristics\n", g, r)
 		return
 	}
 
@@ -902,18 +906,18 @@ func main() {
 				term.Errorf("cleaning cache: %v", err)
 				os.Exit(1)
 			}
-			fmt.Printf("Deleted %d entries older than %d days\n", deleted, *flagCacheClean)
+			term.Printf("Deleted %d entries older than %d days\n", deleted, *flagCacheClean)
 		}
 
 		if *flagCacheStats {
 			totalEntries, oldest, newest, dbSize := getCacheStats(db)
-			fmt.Printf("Cache statistics:\n")
-			fmt.Printf("  Database: %s\n", cachePath)
-			fmt.Printf("  Size: %d bytes (%.2f KB)\n", dbSize, float64(dbSize)/1024)
-			fmt.Printf("  Total entries: %d\n", totalEntries)
+			term.Printf("Cache statistics:\n")
+			term.Printf("  Database: %s\n", cachePath)
+			term.Printf("  Size: %d bytes (%.2f KB)\n", dbSize, float64(dbSize)/1024)
+			term.Printf("  Total entries: %d\n", totalEntries)
 			if totalEntries > 0 {
-				fmt.Printf("  Oldest entry: %s\n", oldest.Format(time.RFC3339))
-				fmt.Printf("  Newest entry: %s\n", newest.Format(time.RFC3339))
+				term.Printf("  Oldest entry: %s\n", oldest.Format(time.RFC3339))
+				term.Printf("  Newest entry: %s\n", newest.Format(time.RFC3339))
 			}
 		}
 		return
@@ -926,8 +930,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set verbose mode on terminal
+	// Set verbose, color and progress mode on terminal
 	term.SetVerbose(*flagVerbose)
+	switch *flagColor {
+	case "never":
+		term.SetPlain(true)
+	case "always":
+		term.SetPlain(false)
+	case "auto":
+		// Default behavior - plain mode is auto-set based on TTY detection
+	default:
+		term.Errorf("invalid --color value %q (use: auto, always, never)", *flagColor)
+		os.Exit(1)
+	}
+	if *flagNoProgress {
+		term.SetProgress(false)
+	}
 	term.Verbose("Found %d projects", len(projects))
 
 	// Build dependency graphs
@@ -975,9 +993,9 @@ func main() {
 		}
 		if targetProject == nil {
 			term.Errorf("Project not found: %s", *flagDumpCache)
-			fmt.Println("\nAvailable projects:")
+			term.Println("\nAvailable projects:")
 			for _, p := range projects {
-				fmt.Printf("  %s (%s)\n", p.Name, p.Path)
+				term.Printf("  %s (%s)\n", p.Name, p.Path)
 			}
 			os.Exit(1)
 		}
@@ -990,14 +1008,14 @@ func main() {
 
 		// Show current lookup info
 		currentArgs := append([]string{command}, dotnetArgs...)
-		fmt.Printf("Project: %s\n", targetProject.Name)
-		fmt.Printf("Path: %s\n", targetProject.Path)
-		fmt.Printf("Cache key: %s\n", key)
-		fmt.Printf("Dirty hash: %s\n", dirtyHash)
-		fmt.Printf("Args: %v (hash: %s)\n", currentArgs, argsHash)
+		term.Printf("Project: %s\n", targetProject.Name)
+		term.Printf("Path: %s\n", targetProject.Path)
+		term.Printf("Cache key: %s\n", key)
+		term.Printf("Dirty hash: %s\n", dirtyHash)
+		term.Printf("Args: %v (hash: %s)\n", currentArgs, argsHash)
 
 		// Scan for all cache entries matching this project (any argsHash)
-		fmt.Println("\nCache entries for this project:")
+		term.Println("\nCache entries for this project:")
 		prefix := commit + ":"
 		found := 0
 		db.View(func(tx *bolt.Tx) error {
@@ -1010,19 +1028,19 @@ func main() {
 				_, entryDirtyHash, entryArgsHash, projectPath := parseCacheKey(string(k))
 				if projectPath == targetProject.Path {
 					entry := decodeCacheEntry(v)
-					fmt.Printf("\n[%d] Key: %s\n", found+1, string(k))
-					fmt.Printf("    Dirty hash: %s %s\n", entryDirtyHash, map[bool]string{true: "(matches)", false: "(different)"}[entryDirtyHash == dirtyHash])
-					fmt.Printf("    Args hash: %s\n", entryArgsHash)
+					term.Printf("\n[%d] Key: %s\n", found+1, string(k))
+					term.Printf("    Dirty hash: %s %s\n", entryDirtyHash, map[bool]string{true: "(matches)", false: "(different)"}[entryDirtyHash == dirtyHash])
+					term.Printf("    Args hash: %s\n", entryArgsHash)
 					if entry.Args != "" {
-						fmt.Printf("    Args: %s\n", entry.Args)
+						term.Printf("    Args: %s\n", entry.Args)
 					}
-					fmt.Printf("    Success: %v\n", entry.Success)
-					fmt.Printf("    LastRun: %s\n", time.Unix(entry.LastRun, 0).Format(time.RFC3339))
-					fmt.Printf("    Output: %d bytes\n", len(entry.Output))
+					term.Printf("    Success: %v\n", entry.Success)
+					term.Printf("    LastRun: %s\n", time.Unix(entry.LastRun, 0).Format(time.RFC3339))
+					term.Printf("    Output: %d bytes\n", len(entry.Output))
 					if len(entry.Output) > 0 && !entry.Success {
-						fmt.Println("\n    --- Cached Output ---")
-						fmt.Println(string(entry.Output))
-						fmt.Println("    --- End Output ---")
+						term.Println("\n    --- Cached Output ---")
+						term.Println(string(entry.Output))
+						term.Println("    --- End Output ---")
 					}
 					found++
 				}
@@ -1030,7 +1048,7 @@ func main() {
 			return nil
 		})
 		if found == 0 {
-			fmt.Println("No cache entries found for this project with current commit.")
+			term.Println("No cache entries found for this project with current commit.")
 		}
 		return
 	}
@@ -1282,7 +1300,7 @@ func main() {
 					dirtyHash := computeDirtyHash(gitRoot, projectDirtyFiles)
 					key := makeCacheKey(commit, dirtyHash, argsHash, p.Path)
 					if result := lookupCache(db, key); result != nil && len(result.Output) > 0 {
-						fmt.Printf("=== %s ===\n%s\n", p.Name, string(result.Output))
+						term.Printf("=== %s ===\n%s\n", p.Name, string(result.Output))
 					}
 				}
 			}
@@ -1322,7 +1340,7 @@ func main() {
 		term.Success("Affected projects:")
 	}
 	for _, p := range targetProjects {
-		fmt.Println(p.Path)
+		term.Println(p.Path)
 	}
 }
 
@@ -1652,6 +1670,11 @@ func extractTestStats(output string) string {
 }
 
 func formatTestStats(failed, passed, skipped, total string) string {
+	// Plain mode - no colors
+	if term.IsPlain() {
+		return fmt.Sprintf("Failed: %2s  Passed: %3s  Skipped: %2s  Total: %3s", failed, passed, skipped, total)
+	}
+
 	failedN, _ := strconv.Atoi(failed)
 	passedN, _ := strconv.Atoi(passed)
 	skippedN, _ := strconv.Atoi(skipped)
@@ -1733,7 +1756,11 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 				if !w.directMode {
 					w.directMode = true
 					// Clear status line and print header
-					term.Status("  %s✗%s %s\n\n", colorRed, colorReset, w.project.Name)
+					if term.IsPlain() {
+						term.Status("  FAIL %s\n\n", w.project.Name)
+					} else {
+						term.Status("  %s✗%s %s\n\n", colorRed, colorReset, w.project.Name)
+					}
 					// Print buffered output
 					term.Write(w.buffer.Bytes())
 					if w.onFailure != nil {
@@ -1968,10 +1995,16 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				cmd.Stdout = lineWriter
 				cmd.Stderr = lineWriter
 				cmd.Dir = root
-				cmd.Env = append(os.Environ(),
-					"DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION=1",
-					"TERM=xterm-256color",
-				)
+				if term.IsPlain() {
+					// In plain mode, don't force ANSI - let dotnet auto-detect
+					cmd.Env = os.Environ()
+				} else {
+					// Force ANSI colors when in a TTY
+					cmd.Env = append(os.Environ(),
+						"DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION=1",
+						"TERM=xterm-256color",
+					)
+				}
 
 				term.Verbose("  [%s] dotnet %s", p.Name, strings.Join(args, " "))
 
@@ -2079,7 +2112,11 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			// Add filter info if tests were filtered
 			filterInfo := ""
 			if r.filteredTests && len(r.testClasses) > 0 {
-				filterInfo = fmt.Sprintf("  %s[%s]%s", colorCyan, strings.Join(r.testClasses, ", "), colorReset)
+				if term.IsPlain() {
+					filterInfo = fmt.Sprintf("  [%s]", strings.Join(r.testClasses, ", "))
+				} else {
+					filterInfo = fmt.Sprintf("  %s[%s]%s", colorCyan, strings.Join(r.testClasses, ", "), colorReset)
+				}
 			}
 
 			if r.success {
@@ -2204,7 +2241,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			})
 			term.Println()
 			for _, o := range outputs {
-				fmt.Printf("=== %s ===\n%s\n", o.name, o.output)
+				term.Printf("=== %s ===\n%s\n", o.name, o.output)
 			}
 		}
 	}
