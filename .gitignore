@@ -97,5 +97,8 @@ Temporary Items
 # iCloud generated files
 *.icloud
 
+### Go build ###
 donotnet
-donotnet
+
+### GoReleaser ###
+dist/
