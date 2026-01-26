@@ -281,8 +281,9 @@ func filterFilesToProject(files []string, relevantDirs []string) []string {
 }
 
 // canSkipRestore checks if --no-restore can be safely used
-// Returns true if obj/project.assets.json exists and is newer than the .csproj
-func canSkipRestore(projectPath string) bool {
+// Returns true if obj/project.assets.json exists and is newer than
+// any .csproj file in the project or its transitive dependencies
+func canSkipRestore(projectPath string, relevantDirs []string) bool {
 	projectDir := filepath.Dir(projectPath)
 	assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
 
@@ -291,17 +292,35 @@ func canSkipRestore(projectPath string) bool {
 		return false
 	}
 
-	projectInfo, err := os.Stat(projectPath)
-	if err != nil {
-		return false
+	// Check if any .csproj in the project or its dependencies is newer than assets.json
+	for _, dir := range relevantDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			if strings.HasSuffix(strings.ToLower(entry.Name()), ".csproj") {
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
+				if info.ModTime().After(assetsInfo.ModTime()) {
+					return false
+				}
+			}
+		}
 	}
 
-	return assetsInfo.ModTime().After(projectInfo.ModTime())
+	return true
 }
 
 // canSkipBuild checks if --no-build can be safely used
 // Returns true if output DLL exists and is newer than all source files
-func canSkipBuild(projectPath string) bool {
+// in the project AND all its transitive dependencies
+func canSkipBuild(projectPath string, relevantDirs []string) bool {
 	projectDir := filepath.Dir(projectPath)
 	projectName := strings.TrimSuffix(filepath.Base(projectPath), ".csproj")
 
@@ -329,36 +348,42 @@ func canSkipBuild(projectPath string) bool {
 		return false
 	}
 
-	// Check if any source file is newer than the DLL
+	// Check if any source file in any relevant directory is newer than the DLL
+	// This includes the project's own directory AND all transitive dependencies
 	newerSourceFound := false
-	filepath.WalkDir(projectDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || newerSourceFound {
-			return filepath.SkipAll
+	for _, dir := range relevantDirs {
+		if newerSourceFound {
+			break
 		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == "bin" || name == "obj" || name == ".git" {
-				return filepath.SkipDir
+		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || newerSourceFound {
+				return filepath.SkipAll
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name == "bin" || name == "obj" || name == ".git" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			ext := strings.ToLower(filepath.Ext(path))
+			if ext != ".cs" && ext != ".csproj" && ext != ".razor" && ext != ".props" && ext != ".targets" {
+				return nil
+			}
+
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+
+			if info.ModTime().After(dllInfo.ModTime()) {
+				newerSourceFound = true
+				return filepath.SkipAll
 			}
 			return nil
-		}
-
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".cs" && ext != ".csproj" && ext != ".razor" && ext != ".props" && ext != ".targets" {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-
-		if info.ModTime().After(dllInfo.ModTime()) {
-			newerSourceFound = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
+		})
+	}
 
 	return !newerSourceFound
 }
@@ -1821,9 +1846,12 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				}
 
 				if !*flagFullBuild {
+					// Get all relevant directories (project + transitive dependencies)
+					relevantDirs := getProjectRelevantDirs(p, forwardGraph)
+
 					// --no-build is only valid for test, not build
 					if command == "test" && !hasNoBuild {
-						if canSkipBuild(projectPath) {
+						if canSkipBuild(projectPath, relevantDirs) {
 							args = append(args, "--no-build")
 							hasNoBuild = true
 							skippedBuild = true
@@ -1833,7 +1861,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 						}
 					}
 					if !hasNoRestore && !hasNoBuild {
-						if canSkipRestore(projectPath) {
+						if canSkipRestore(projectPath, relevantDirs) {
 							args = append(args, "--no-restore")
 							skippedRestore = true
 							term.Verbose("  [%s] skipping restore (up-to-date)", p.Name)
