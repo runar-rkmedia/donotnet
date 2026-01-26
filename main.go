@@ -26,6 +26,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/runar-rkmedia/donotnet/coverage"
+	"github.com/runar-rkmedia/donotnet/testresults"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -101,6 +102,8 @@ var (
 	flagBuildTestCoverage  = flag.Bool("build-test-coverage", false, "Build per-test coverage map for test projects (slow, runs each test individually)")
 	flagHeuristics         = flag.String("heuristics", "default", "Test filter heuristics: default, none, or comma-separated names (use -list-heuristics to see options)")
 	flagListHeuristics     = flag.Bool("list-heuristics", false, "List available test filter heuristics")
+	flagFailed             = flag.Bool("failed", false, "Only run projects that failed in the previous run")
+	flagDumpCache          = flag.String("dump-cache", "", "Dump cached output for a project (by name or path)")
 )
 
 func init() {
@@ -133,6 +136,7 @@ Examples:
   donotnet -vcs-changed test        # Test projects with uncommitted changes
   donotnet -vcs-ref=main test       # Test projects changed vs main branch
   donotnet -force test              # Run all tests, ignoring cache
+  donotnet -failed test             # Rerun only previously failed tests
   donotnet -watch test              # Watch for changes and rerun tests
   donotnet -watch -coverage test    # Watch mode with coverage-based selection
   donotnet -cache-stats             # Show cache statistics
@@ -401,21 +405,35 @@ func parseCacheKey(key string) (commit, dirtyHash, argsHash, projectPath string)
 
 // cacheEntry represents a cache entry value
 type cacheEntry struct {
-	LastSuccess int64  // Unix timestamp
-	CreatedAt   int64  // Unix timestamp
-	Output      []byte // Captured stdout from the run
+	LastRun   int64  // Unix timestamp of last run
+	CreatedAt int64  // Unix timestamp when first created
+	Success   bool   // Whether the last run succeeded
+	Output    []byte // Captured stdout from the run
+	Args      string // The args used for this run (e.g., "test --no-build")
 }
 
 // encodeCacheEntry encodes a cache entry to bytes
-// Format: [LastSuccess:8][CreatedAt:8][OutputLen:4][Output:OutputLen]
+// Format: [LastRun:8][CreatedAt:8][OutputLen:4][Output:OutputLen][Success:1][ArgsLen:4][Args:ArgsLen]
 func encodeCacheEntry(e cacheEntry) []byte {
 	outputLen := len(e.Output)
-	buf := make([]byte, 20+outputLen)
-	binary.LittleEndian.PutUint64(buf[0:8], uint64(e.LastSuccess))
+	argsLen := len(e.Args)
+	buf := make([]byte, 25+outputLen+argsLen)
+	binary.LittleEndian.PutUint64(buf[0:8], uint64(e.LastRun))
 	binary.LittleEndian.PutUint64(buf[8:16], uint64(e.CreatedAt))
 	binary.LittleEndian.PutUint32(buf[16:20], uint32(outputLen))
 	if outputLen > 0 {
-		copy(buf[20:], e.Output)
+		copy(buf[20:20+outputLen], e.Output)
+	}
+	pos := 20 + outputLen
+	if e.Success {
+		buf[pos] = 1
+	} else {
+		buf[pos] = 0
+	}
+	pos++
+	binary.LittleEndian.PutUint32(buf[pos:pos+4], uint32(argsLen))
+	if argsLen > 0 {
+		copy(buf[pos+4:], e.Args)
 	}
 	return buf
 }
@@ -426,8 +444,9 @@ func decodeCacheEntry(data []byte) cacheEntry {
 		return cacheEntry{}
 	}
 	entry := cacheEntry{
-		LastSuccess: int64(binary.LittleEndian.Uint64(data[0:8])),
-		CreatedAt:   int64(binary.LittleEndian.Uint64(data[8:16])),
+		LastRun:   int64(binary.LittleEndian.Uint64(data[0:8])),
+		CreatedAt: int64(binary.LittleEndian.Uint64(data[8:16])),
+		Success:   true, // Default for backward compatibility
 	}
 	// Handle old format (16 bytes) and new format (20+ bytes)
 	if len(data) >= 20 {
@@ -436,6 +455,19 @@ func decodeCacheEntry(data []byte) cacheEntry {
 			// Must copy - bbolt's buffer is only valid during transaction
 			entry.Output = make([]byte, outputLen)
 			copy(entry.Output, data[20:20+outputLen])
+			pos := 20 + int(outputLen)
+			// Check for success byte (new format)
+			if len(data) >= pos+1 {
+				entry.Success = data[pos] == 1
+				pos++
+				// Check for args (newest format)
+				if len(data) >= pos+4 {
+					argsLen := binary.LittleEndian.Uint32(data[pos : pos+4])
+					if len(data) >= pos+4+int(argsLen) {
+						entry.Args = string(data[pos+4 : pos+4+int(argsLen)])
+					}
+				}
+			}
 		}
 	}
 	return entry
@@ -443,11 +475,13 @@ func decodeCacheEntry(data []byte) cacheEntry {
 
 // cacheResult contains the result of a cache lookup
 type cacheResult struct {
-	Time   time.Time
-	Output []byte
+	Time    time.Time
+	Success bool
+	Output  []byte
 }
 
 // lookupCache checks if a cache entry exists and returns the result
+// Only returns successful entries (for cache-hit purposes)
 func lookupCache(db *bolt.DB, key string) *cacheResult {
 	var result *cacheResult
 	db.View(func(tx *bolt.Tx) error {
@@ -460,17 +494,45 @@ func lookupCache(db *bolt.DB, key string) *cacheResult {
 			return nil
 		}
 		entry := decodeCacheEntry(data)
+		// Only return successful entries for cache-hit purposes
+		if !entry.Success {
+			return nil
+		}
 		result = &cacheResult{
-			Time:   time.Unix(entry.LastSuccess, 0),
-			Output: entry.Output,
+			Time:    time.Unix(entry.LastRun, 0),
+			Success: entry.Success,
+			Output:  entry.Output,
 		}
 		return nil
 	})
 	return result
 }
 
-// markCacheSuccess records a successful test/build for the given key
-func markCacheSuccess(db *bolt.DB, key string, t time.Time, output []byte) error {
+// lookupCacheAny checks if a cache entry exists (success or failure) and returns the result
+func lookupCacheAny(db *bolt.DB, key string) *cacheResult {
+	var result *cacheResult
+	db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(cacheBucket))
+		if b == nil {
+			return nil
+		}
+		data := b.Get([]byte(key))
+		if data == nil {
+			return nil
+		}
+		entry := decodeCacheEntry(data)
+		result = &cacheResult{
+			Time:    time.Unix(entry.LastRun, 0),
+			Success: entry.Success,
+			Output:  entry.Output,
+		}
+		return nil
+	})
+	return result
+}
+
+// markCacheResult records a test/build result for the given key
+func markCacheResult(db *bolt.DB, key string, t time.Time, success bool, output []byte, args string) error {
 	return db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(cacheBucket))
 		if b == nil {
@@ -480,9 +542,11 @@ func markCacheSuccess(db *bolt.DB, key string, t time.Time, output []byte) error
 		// Check if entry exists (to preserve CreatedAt)
 		existing := b.Get([]byte(key))
 		entry := cacheEntry{
-			LastSuccess: t.Unix(),
-			CreatedAt:   t.Unix(),
-			Output:      output,
+			LastRun:   t.Unix(),
+			CreatedAt: t.Unix(),
+			Success:   success,
+			Output:    output,
+			Args:      args,
 		}
 		if existing != nil {
 			old := decodeCacheEntry(existing)
@@ -505,7 +569,7 @@ func getCacheStats(db *bolt.DB) (totalEntries int, oldestEntry, newestEntry time
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			totalEntries++
 			entry := decodeCacheEntry(v)
-			t := time.Unix(entry.LastSuccess, 0)
+			t := time.Unix(entry.LastRun, 0)
 			if oldestEntry.IsZero() || t.Before(oldestEntry) {
 				oldestEntry = t
 			}
@@ -538,7 +602,7 @@ func deleteOldEntries(db *bolt.DB, maxAge time.Duration) (deleted int, err error
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			entry := decodeCacheEntry(v)
-			if entry.LastSuccess < cutoff {
+			if entry.LastRun < cutoff {
 				keysToDelete = append(keysToDelete, append([]byte{}, k...))
 			}
 		}
@@ -552,6 +616,94 @@ func deleteOldEntries(db *bolt.DB, maxAge time.Duration) (deleted int, err error
 		return nil
 	})
 	return
+}
+
+// failedCacheEntry contains info about a failed cache entry
+type failedCacheEntry struct {
+	ProjectPath string
+	Output      []byte
+}
+
+// getFailedFromCache scans the cache for failed entries matching the given commit and argsHash.
+// Returns a map of project path -> output for failed projects.
+func getFailedFromCache(db *bolt.DB, commit, argsHash string) []failedCacheEntry {
+	var failed []failedCacheEntry
+	prefix := commit + ":"
+
+	db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(cacheBucket))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); k, v = c.Next() {
+			entry := decodeCacheEntry(v)
+			if !entry.Success {
+				// Parse key to get project path: commit:dirtyHash:argsHash:projectPath
+				_, _, keyArgsHash, projectPath := parseCacheKey(string(k))
+				// Only include entries with matching argsHash (same test command)
+				if keyArgsHash == argsHash && projectPath != "" {
+					failed = append(failed, failedCacheEntry{
+						ProjectPath: projectPath,
+						Output:      entry.Output,
+					})
+				}
+			}
+		}
+		return nil
+	})
+	return failed
+}
+
+// getFailedTestFilter parses the cached output and/or TRX file to extract failed tests
+// and build a filter string for dotnet test.
+// Returns empty string if no specific tests can be identified (will rerun entire project).
+func getFailedTestFilter(cachedOutput []byte, reportsDir, projectName string) string {
+	var failedTests []testresults.FailedTest
+
+	// Try TRX file first (more reliable)
+	trxPath := filepath.Join(reportsDir, projectName+".trx")
+	if info, err := os.Stat(trxPath); err == nil && info.Size() > 0 {
+		if tests, err := testresults.ParseTRXFile(trxPath); err == nil && len(tests) > 0 {
+			term.Verbose("  [%s] found %d failed tests in TRX", projectName, len(tests))
+			failedTests = tests
+		} else if err != nil {
+			term.Verbose("  [%s] TRX parse error: %v", projectName, err)
+		} else {
+			term.Verbose("  [%s] TRX has no failed tests", projectName)
+		}
+	} else {
+		term.Verbose("  [%s] no TRX file at %s", projectName, trxPath)
+	}
+
+	// Fall back to parsing stdout if TRX didn't give us results
+	if len(failedTests) == 0 && len(cachedOutput) > 0 {
+		failedTests = testresults.ParseStdout(string(cachedOutput))
+		if len(failedTests) > 0 {
+			term.Verbose("  [%s] found %d failed tests in stdout", projectName, len(failedTests))
+		} else {
+			term.Verbose("  [%s] no failed tests found in stdout (%d bytes)", projectName, len(cachedOutput))
+			// Show first few lines for debugging
+			lines := strings.Split(string(cachedOutput), "\n")
+			for i, line := range lines {
+				if i >= 10 {
+					term.Verbose("  [%s]   ... (%d more lines)", projectName, len(lines)-10)
+					break
+				}
+				if len(line) > 100 {
+					term.Verbose("  [%s]   %q...", projectName, line[:100])
+				} else {
+					term.Verbose("  [%s]   %q", projectName, line)
+				}
+			}
+		}
+	}
+
+	if len(failedTests) == 0 {
+		return ""
+	}
+
+	return testresults.BuildFilterString(failedTests)
 }
 
 // ============================================================================
@@ -651,7 +803,24 @@ func main() {
 	}
 
 	// Show help if no command and no action flags
-	if command == "" && *flagListAffected == "" && !*flagCacheStats && *flagCacheClean < 0 && !*flagListTests && !*flagBuildTestCoverage {
+	hasActionFlag := false
+	switch {
+	case command != "":
+		hasActionFlag = true
+	case *flagListAffected != "":
+		hasActionFlag = true
+	case *flagCacheStats:
+		hasActionFlag = true
+	case *flagCacheClean >= 0:
+		hasActionFlag = true
+	case *flagListTests:
+		hasActionFlag = true
+	case *flagBuildTestCoverage:
+		hasActionFlag = true
+	case *flagDumpCache != "":
+		hasActionFlag = true
+	}
+	if !hasActionFlag {
 		flag.Usage()
 		os.Exit(0)
 	}
@@ -769,6 +938,78 @@ func main() {
 		term.Verbose("Working tree clean")
 	}
 
+	// Handle -dump-cache flag
+	if *flagDumpCache != "" {
+		// Find project by name or path
+		var targetProject *Project
+		for _, p := range projects {
+			if p.Name == *flagDumpCache || p.Path == *flagDumpCache || strings.HasSuffix(p.Path, "/"+*flagDumpCache) {
+				targetProject = p
+				break
+			}
+		}
+		if targetProject == nil {
+			term.Errorf("Project not found: %s", *flagDumpCache)
+			fmt.Println("\nAvailable projects:")
+			for _, p := range projects {
+				fmt.Printf("  %s (%s)\n", p.Name, p.Path)
+			}
+			os.Exit(1)
+		}
+
+		// Build cache key
+		relevantDirs := getProjectRelevantDirs(targetProject, forwardGraph)
+		projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
+		dirtyHash := computeDirtyHash(gitRoot, projectDirtyFiles)
+		key := makeCacheKey(commit, dirtyHash, argsHash, targetProject.Path)
+
+		// Show current lookup info
+		currentArgs := append([]string{command}, dotnetArgs...)
+		fmt.Printf("Project: %s\n", targetProject.Name)
+		fmt.Printf("Path: %s\n", targetProject.Path)
+		fmt.Printf("Cache key: %s\n", key)
+		fmt.Printf("Dirty hash: %s\n", dirtyHash)
+		fmt.Printf("Args: %v (hash: %s)\n", currentArgs, argsHash)
+
+		// Scan for all cache entries matching this project (any argsHash)
+		fmt.Println("\nCache entries for this project:")
+		prefix := commit + ":"
+		found := 0
+		db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte(cacheBucket))
+			if b == nil {
+				return nil
+			}
+			c := b.Cursor()
+			for k, v := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); k, v = c.Next() {
+				_, entryDirtyHash, entryArgsHash, projectPath := parseCacheKey(string(k))
+				if projectPath == targetProject.Path {
+					entry := decodeCacheEntry(v)
+					fmt.Printf("\n[%d] Key: %s\n", found+1, string(k))
+					fmt.Printf("    Dirty hash: %s %s\n", entryDirtyHash, map[bool]string{true: "(matches)", false: "(different)"}[entryDirtyHash == dirtyHash])
+					fmt.Printf("    Args hash: %s\n", entryArgsHash)
+					if entry.Args != "" {
+						fmt.Printf("    Args: %s\n", entry.Args)
+					}
+					fmt.Printf("    Success: %v\n", entry.Success)
+					fmt.Printf("    LastRun: %s\n", time.Unix(entry.LastRun, 0).Format(time.RFC3339))
+					fmt.Printf("    Output: %d bytes\n", len(entry.Output))
+					if len(entry.Output) > 0 && !entry.Success {
+						fmt.Println("\n    --- Cached Output ---")
+						fmt.Println(string(entry.Output))
+						fmt.Println("    --- End Output ---")
+					}
+					found++
+				}
+			}
+			return nil
+		})
+		if found == 0 {
+			fmt.Println("No cache entries found for this project with current commit.")
+		}
+		return
+	}
+
 	// Determine which projects are changed
 	var vcsChangedFiles []string
 	useVcsFilter := *flagVcsChanged || *flagVcsRef != ""
@@ -836,6 +1077,62 @@ func main() {
 		targetProjects = append(targetProjects, p)
 	}
 
+	// Handle --failed: filter to only projects that failed in their last run
+	var failedTestFilters map[string]string
+	if *flagFailed {
+		failedEntries := getFailedFromCache(db, commit, argsHash)
+
+		if len(failedEntries) == 0 {
+			term.Info("--failed: No previously failed projects found in cache for current commit.")
+			term.Info("         This happens when tests haven't been run yet, or all tests passed.")
+			term.Info("         Running all affected tests instead.\n")
+			// Continue with normal execution (don't filter to failed)
+		} else {
+			// Build map of project path -> test filter and project path -> exists
+			failedPaths := make(map[string]bool)
+			failedTestFilters = make(map[string]string)
+			for _, entry := range failedEntries {
+				failedPaths[entry.ProjectPath] = true
+				// Look up the project to get its name for TRX file lookup
+				if p, ok := projectsByPath[entry.ProjectPath]; ok {
+					filter := getFailedTestFilter(entry.Output, reportsDir, p.Name)
+					if filter != "" {
+						failedTestFilters[entry.ProjectPath] = filter
+						term.Verbose("  %s: filtering to %d failed tests", p.Name, strings.Count(filter, "|")+1)
+					}
+				}
+			}
+
+			var failedProjects []*Project
+			for _, p := range projects {
+				if command == "test" && !p.IsTest {
+					continue
+				}
+				if failedPaths[p.Path] {
+					failedProjects = append(failedProjects, p)
+				}
+			}
+
+			if len(failedProjects) == 0 {
+				term.Info("--failed: Previously failed projects no longer exist or are not affected.")
+				term.Info("         Running all affected tests instead.\n")
+				// Continue with normal execution (don't filter to failed)
+			} else {
+				filterCount := 0
+				for range failedTestFilters {
+					filterCount++
+				}
+				if filterCount > 0 {
+					term.Info("Running %d previously failed project(s) with test-level filtering", len(failedProjects))
+				} else {
+					term.Info("Running %d previously failed project(s)", len(failedProjects))
+				}
+				targetProjects = failedProjects
+				cachedProjects = nil // Don't show cached count with --failed
+			}
+		}
+	}
+
 	// Handle -list-tests flag
 	if *flagListTests {
 		// Filter to test projects only
@@ -883,7 +1180,7 @@ func main() {
 		if *flagWatch {
 			// Run initial test/build first
 			if len(targetProjects) > 0 {
-				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil)
+				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, nil)
 			} else {
 				term.Dim("No affected projects to %s (%d cached)", command, len(cachedProjects))
 			}
@@ -967,7 +1264,7 @@ func main() {
 			return
 		}
 
-		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil)
+		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, commit, dirtyFiles, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, failedTestFilters)
 		if !success {
 			os.Exit(1)
 		}
@@ -1425,9 +1722,12 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, db *bolt.DB, commit string, dirtyFiles []string, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter) bool {
+func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, db *bolt.DB, commit string, dirtyFiles []string, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter, failedTestFilters map[string]string) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Build args string for caching
+	argsForCache := strings.Join(append([]string{command}, extraArgs...), " ")
 
 	// Handle Ctrl+C to kill all running processes
 	sigChan := make(chan os.Signal, 1)
@@ -1603,6 +1903,15 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					}
 				}
 
+				// Apply failed test filters (from --failed flag)
+				if command == "test" && failedTestFilters != nil {
+					if filter, ok := failedTestFilters[p.Path]; ok && filter != "" {
+						args = append(args, "--filter", filter)
+						filteredTests = true
+						testClasses = []string{"previously failed"}
+					}
+				}
+
 				// Add TRX logger if reports enabled
 				var trxPath string
 				if !*flagNoReports && command == "test" {
@@ -1717,7 +2026,13 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			completed++
 			allResults = append(allResults, r)
 			if *flagQuiet {
-				// In quiet mode, skip progress output
+				// In quiet mode, skip progress output but still mark cache
+				now := time.Now()
+				relevantDirs := getProjectRelevantDirs(r.project, forwardGraph)
+				projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
+				dirtyHash := computeDirtyHash(root, projectDirtyFiles)
+				key := makeCacheKey(commit, dirtyHash, argsHash, r.project.Path)
+				markCacheResult(db, key, now, r.success, []byte(r.output), argsForCache)
 				if r.success {
 					succeeded++
 				} else {
@@ -1756,7 +2071,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
 				dirtyHash := computeDirtyHash(root, projectDirtyFiles)
 				key := makeCacheKey(commit, dirtyHash, argsHash, r.project.Path)
-				markCacheSuccess(db, key, now, []byte(r.output))
+				markCacheResult(db, key, now, true, []byte(r.output), argsForCache)
 
 				// Also mark transitive dependencies (without output)
 				for _, depPath := range getTransitiveDependencies(r.project.Path, forwardGraph) {
@@ -1765,11 +2080,17 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 						depDirtyFiles := filterFilesToProject(dirtyFiles, depRelevantDirs)
 						depDirtyHash := computeDirtyHash(root, depDirtyFiles)
 						depKey := makeCacheKey(commit, depDirtyHash, argsHash, dep.Path)
-						markCacheSuccess(db, depKey, now, nil)
+						markCacheResult(db, depKey, now, true, nil, argsForCache)
 					}
 				}
 			} else {
 				failures = append(failures, r)
+				// Mark failure in cache for --failed support
+				relevantDirs := getProjectRelevantDirs(r.project, forwardGraph)
+				projectDirtyFiles := filterFilesToProject(dirtyFiles, relevantDirs)
+				dirtyHash := computeDirtyHash(root, projectDirtyFiles)
+				key := makeCacheKey(commit, dirtyHash, argsHash, r.project.Path)
+				markCacheResult(db, key, time.Now(), false, []byte(r.output), argsForCache)
 				// Check if output was already printed in direct mode
 				alreadyPrinted := false
 				select {
@@ -2529,7 +2850,7 @@ func runWatchMode(ctx *watchContext) {
 		commit := getGitCommit(ctx.gitRoot)
 		dirtyFiles := getGitDirtyFiles(ctx.gitRoot)
 
-		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, commit, dirtyFiles, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir, testFilter)
+		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, commit, dirtyFiles, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir, testFilter, nil)
 
 		term.Info("\nWatching for changes...")
 	}
