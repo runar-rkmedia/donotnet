@@ -904,13 +904,29 @@ func main() {
 	args := flag.Args()
 	var command string
 	var dotnetArgs []string
+	var foundSeparator bool
 	for i, arg := range args {
 		if arg == "--" {
 			dotnetArgs = args[i+1:]
+			foundSeparator = true
 			break
 		}
 		if command == "" && (arg == "test" || arg == "build") {
 			command = arg
+		}
+	}
+
+	// Check for common mistake: dotnet flags without -- separator
+	if !foundSeparator && command != "" {
+		for _, arg := range args {
+			if arg == command {
+				continue
+			}
+			if looksLikeDotnetFlag(arg) {
+				term.Errorf("flag %q looks like a dotnet flag but appears before '--'", arg)
+				term.Error("Use: donotnet %s -- %s", command, strings.Join(args[1:], " "))
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -1306,7 +1322,7 @@ func main() {
 			if len(targetProjects) > 0 {
 				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, nil)
 			} else {
-				term.Dim("No affected projects to %s (%d cached)", command, len(cachedProjects))
+				term.Dim("No affected projects to %s (%d cached)%s", command, len(cachedProjects), formatExtraArgs(dotnetArgs))
 			}
 
 			// Start watch mode
@@ -1357,7 +1373,7 @@ func main() {
 
 		if len(targetProjects) == 0 {
 			if !*flagQuiet {
-				term.Dim("No affected projects to %s (%d cached)", command, len(cachedProjects))
+				term.Dim("No affected projects to %s (%d cached)%s", command, len(cachedProjects), formatExtraArgs(dotnetArgs))
 				// Print all cached projects like a summary
 				for _, p := range cachedProjects {
 					term.CachedLine(p.Name)
@@ -1877,10 +1893,35 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	}
 
 	if !*flagQuiet {
+		// Build status line
+		var parts []string
+		parts = append(parts, fmt.Sprintf("Running %s on %d projects", command, len(projects)))
 		if len(cachedProjects) > 0 {
-			term.Printf("Running %s on %d projects (%d cached, %d workers)...\n", command, len(projects), len(cachedProjects), numWorkers)
-		} else {
-			term.Printf("Running %s on %d projects (%d workers)...\n", command, len(projects), numWorkers)
+			parts = append(parts, fmt.Sprintf("%d cached", len(cachedProjects)))
+		}
+		parts = append(parts, fmt.Sprintf("%d workers", numWorkers))
+
+		// Add condensed extra args if any (excluding internal flags), colored
+		displayArgs := filterDisplayArgs(extraArgs)
+		if len(displayArgs) > 0 {
+			argsStr := strings.Join(displayArgs, " ")
+			if term.IsPlain() {
+				parts = append(parts, argsStr)
+			} else {
+				parts = append(parts, colorYellow+argsStr+colorReset)
+			}
+		}
+
+		term.Printf("%s...\n", strings.Join(parts, ", "))
+
+		// Print per-project filters if --failed mode has filters
+		if len(failedTestFilters) > 0 {
+			term.Dim("Filtering to previously failed tests:")
+			for projectPath, filter := range failedTestFilters {
+				projectName := filepath.Base(filepath.Dir(projectPath))
+				prettyPrintFilter(projectName, filter)
+			}
+			term.Println()
 		}
 	}
 
@@ -2315,6 +2356,118 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	}
 
 	return len(failures) == 0
+}
+
+// looksLikeDotnetFlag returns true if the arg looks like a dotnet test/build flag
+// that should be passed after the -- separator
+func looksLikeDotnetFlag(arg string) bool {
+	// Common dotnet test/build flags that users might forget to put after --
+	dotnetFlags := []string{
+		"--filter", "-f",
+		"--configuration", "-c",
+		"--framework", "-f",
+		"--runtime", "-r",
+		"--no-build",
+		"--no-restore",
+		"--collect",
+		"--settings", "-s",
+		"--logger", "-l",
+		"--output", "-o",
+		"--results-directory",
+		"--blame",
+		"--blame-crash",
+		"--blame-hang",
+		"--diag",
+		"--verbosity", "-v",
+		"--list-tests", "-lt",
+		"--arch", "-a",
+		"--os",
+	}
+
+	argLower := strings.ToLower(arg)
+	for _, flag := range dotnetFlags {
+		if argLower == flag || strings.HasPrefix(argLower, flag+"=") || strings.HasPrefix(argLower, flag+":") {
+			return true
+		}
+	}
+
+	// Also catch things like "Category!=Live" which is clearly a filter value
+	if strings.Contains(arg, "!=") || strings.Contains(arg, "~") {
+		return true
+	}
+
+	return false
+}
+
+// formatExtraArgs formats extra args for display in status messages
+// Returns empty string if no displayable args, or " (args...)" otherwise
+func formatExtraArgs(args []string) string {
+	display := filterDisplayArgs(args)
+	if len(display) == 0 {
+		return ""
+	}
+	if term.IsPlain() {
+		return " (" + strings.Join(display, " ") + ")"
+	}
+	return " " + colorYellow + "(" + strings.Join(display, " ") + ")" + colorReset
+}
+
+// filterDisplayArgs filters extra args for display, removing internal/verbose flags
+func filterDisplayArgs(args []string) []string {
+	var display []string
+	skip := false
+	for _, arg := range args {
+		if skip {
+			skip = false
+			continue
+		}
+		// Skip internal flags that aren't useful for display
+		if strings.HasPrefix(arg, "--logger:") || strings.HasPrefix(arg, "--results-directory:") {
+			continue
+		}
+		// Skip property flags that are verbose
+		if strings.HasPrefix(arg, "--property:") || strings.HasPrefix(arg, "-p:") {
+			continue
+		}
+		// Skip the next arg if this is a flag that takes a value
+		if arg == "--logger" || arg == "--results-directory" || arg == "-l" || arg == "-r" {
+			skip = true
+			continue
+		}
+		display = append(display, arg)
+	}
+	return display
+}
+
+// prettyPrintFilter prints a test filter in a readable format
+func prettyPrintFilter(projectName, filter string) {
+	// Parse filter: "FullyQualifiedName~Foo|FullyQualifiedName~Bar" -> ["Foo", "Bar"]
+	parts := strings.Split(filter, "|")
+	if len(parts) == 0 {
+		return
+	}
+
+	var testNames []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "FullyQualifiedName~") {
+			testNames = append(testNames, strings.TrimPrefix(part, "FullyQualifiedName~"))
+		} else if strings.HasPrefix(part, "FullyQualifiedName=") {
+			testNames = append(testNames, strings.TrimPrefix(part, "FullyQualifiedName="))
+		} else if part != "" {
+			testNames = append(testNames, part)
+		}
+	}
+
+	if len(testNames) == 0 {
+		return
+	}
+
+	// Print project name and test count
+	term.Printf("  %s (%d tests):\n", projectName, len(testNames))
+	for _, name := range testNames {
+		term.Dim("    %s", name)
+	}
 }
 
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
