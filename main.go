@@ -1614,6 +1614,8 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					"TERM=xterm-256color",
 				)
 
+				term.Verbose("  [%s] dotnet %s", p.Name, strings.Join(args, " "))
+
 				err := cmd.Run()
 				duration := time.Since(projectStart)
 

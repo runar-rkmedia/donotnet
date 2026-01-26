@@ -12,6 +12,8 @@ import (
 type TestFilter struct {
 	// ChangedFiles maps project path -> list of changed file paths (relative to git root)
 	ChangedFiles map[string][]string
+	// AllChangedFiles stores all changed files (relative to git root) for coverage lookup
+	AllChangedFiles []string
 	// CoverageMaps maps project name -> per-test coverage map (for coverage-based filtering)
 	CoverageMaps map[string]*TestCoverageMap
 }
@@ -26,6 +28,7 @@ func NewTestFilter() *TestFilter {
 // AddChangedFile records a changed file for a project
 func (tf *TestFilter) AddChangedFile(projectPath, filePath string) {
 	tf.ChangedFiles[projectPath] = append(tf.ChangedFiles[projectPath], filePath)
+	tf.AllChangedFiles = append(tf.AllChangedFiles, filePath)
 }
 
 // Clear resets the filter for a new run
@@ -52,11 +55,22 @@ func (tf *TestFilter) SetCoverageMaps(maps map[string]*TestCoverageMap) {
 
 // GetFilter analyzes changed files for a project and returns a filter if possible
 func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult {
+	// First, try coverage-based filtering using all changed files
+	// This works even when the changed file is in a different project than the test project
+	if len(tf.AllChangedFiles) > 0 && len(tf.CoverageMaps) > 0 {
+		result := tf.getFilterWithCoverage(projectPath, tf.AllChangedFiles, nil)
+		if result.CanFilter {
+			return result
+		}
+		// If coverage lookup found no tests or file not covered, continue to heuristics
+	}
+
+	// Fall back to heuristic-based filtering using per-project changed files
 	files, ok := tf.ChangedFiles[projectPath]
 	if !ok || len(files) == 0 {
 		return FilterResult{
 			CanFilter: false,
-			Reason:    "no changed files tracked",
+			Reason:    "no changed files tracked for this project",
 		}
 	}
 
@@ -74,9 +88,12 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 		}
 	}
 
-	// If we have non-test files, try coverage-based filtering
+	// If we have non-test files and no coverage data, can't filter
 	if len(nonTestFiles) > 0 {
-		return tf.getFilterWithCoverage(projectPath, nonTestFiles, testClasses)
+		return FilterResult{
+			CanFilter: false,
+			Reason:    fmt.Sprintf("non-test file changed: %s", filepath.Base(nonTestFiles[0])),
+		}
 	}
 
 	if len(testClasses) == 0 {
@@ -106,7 +123,7 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 }
 
 // getFilterWithCoverage attempts to build a filter using per-test coverage data
-func (tf *TestFilter) getFilterWithCoverage(projectPath string, nonTestFiles []string, testClasses []string) FilterResult {
+func (tf *TestFilter) getFilterWithCoverage(projectPath string, changedFiles []string, testClasses []string) FilterResult {
 	// Get project name from path (e.g., "tests/Foo.Tests/Foo.Tests.csproj" -> "Foo.Tests")
 	projectName := strings.TrimSuffix(filepath.Base(projectPath), ".csproj")
 
@@ -114,36 +131,49 @@ func (tf *TestFilter) getFilterWithCoverage(projectPath string, nonTestFiles []s
 	if !ok || covMap == nil {
 		return FilterResult{
 			CanFilter: false,
-			Reason:    fmt.Sprintf("no coverage data for %s, non-test file changed: %s", projectName, filepath.Base(nonTestFiles[0])),
+			Reason:    fmt.Sprintf("no coverage data for %s", projectName),
 		}
 	}
 
 	// Collect tests that cover any of the changed files
 	testsToRun := make(map[string]bool)
-	var uncoveredFiles []string
+	var uncoveredSourceFiles []string
 
-	for _, file := range nonTestFiles {
+	for _, file := range changedFiles {
 		// Normalize path separators
 		normalizedFile := filepath.ToSlash(file)
+
+		// Check if this is a test file - if so, add the class name directly
+		fileName := filepath.Base(file)
+		nameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+		if strings.HasSuffix(nameWithoutExt, "Tests") || strings.HasSuffix(nameWithoutExt, "Test") {
+			testsToRun[nameWithoutExt] = true
+			continue
+		}
+
+		// Look up in coverage map
 		tests, covered := covMap.FileToTests[normalizedFile]
-		if !covered || len(tests) == 0 {
-			uncoveredFiles = append(uncoveredFiles, filepath.Base(file))
-		} else {
+		if covered && len(tests) > 0 {
 			for _, t := range tests {
 				testsToRun[t] = true
+			}
+		} else {
+			// Only track as uncovered if it's a .cs file (not .csproj, .razor, etc.)
+			if strings.HasSuffix(strings.ToLower(file), ".cs") {
+				uncoveredSourceFiles = append(uncoveredSourceFiles, filepath.Base(file))
 			}
 		}
 	}
 
-	// If any files are not in coverage data, fall back to running all tests
-	if len(uncoveredFiles) > 0 {
+	// If any source files are not in coverage data, fall back to running all tests
+	if len(uncoveredSourceFiles) > 0 {
 		return FilterResult{
 			CanFilter: false,
-			Reason:    fmt.Sprintf("file(s) not in coverage: %s", strings.Join(uncoveredFiles, ", ")),
+			Reason:    fmt.Sprintf("file(s) not in coverage: %s", strings.Join(uncoveredSourceFiles, ", ")),
 		}
 	}
 
-	// Add test classes from test file changes
+	// Add test classes from test file changes (passed in separately)
 	for _, class := range testClasses {
 		testsToRun[class] = true
 	}
@@ -167,7 +197,7 @@ func (tf *TestFilter) getFilterWithCoverage(projectPath string, nonTestFiles []s
 	return FilterResult{
 		CanFilter:   true,
 		TestFilter:  filter,
-		Reason:      fmt.Sprintf("coverage-based: %d test(s) for %d file(s)", len(testsToRun), len(nonTestFiles)),
+		Reason:      fmt.Sprintf("coverage-based: %d test(s) for %d file(s)", len(testsToRun), len(changedFiles)),
 		TestClasses: testNames,
 	}
 }
