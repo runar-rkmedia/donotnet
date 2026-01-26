@@ -20,9 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/runar-rkmedia/donotnet/coverage"
@@ -1862,7 +1860,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 	// Handle Ctrl+C to kill all running processes
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigChan, shutdownSignals...)
 	go func() {
 		<-sigChan
 		term.Warn("\nInterrupted, killing processes...")
@@ -2057,11 +2055,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				args = append(args, extraArgs...)
 
 				cmd := exec.CommandContext(ctx, "dotnet", args...)
-				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-				cmd.Cancel = func() error {
-					// Kill the entire process group
-					return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				}
+				setupProcessGroup(cmd)
 
 				// Custom writer that captures output and sends status updates
 				var output bytes.Buffer
@@ -2329,33 +2323,6 @@ func stripAnsi(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
 
-type winsize struct {
-	Row    uint16
-	Col    uint16
-	Xpixel uint16
-	Ypixel uint16
-}
-
-func getTerminalWidth() int {
-	ws := &winsize{}
-	ret, _, _ := syscall.Syscall(syscall.SYS_IOCTL,
-		uintptr(syscall.Stderr),
-		uintptr(syscall.TIOCGWINSZ),
-		uintptr(unsafe.Pointer(ws)))
-
-	if int(ret) == 0 && ws.Col > 0 {
-		return int(ws.Col)
-	}
-
-	// Fallback to COLUMNS env
-	if cols := os.Getenv("COLUMNS"); cols != "" {
-		if n, err := strconv.Atoi(cols); err == nil && n > 0 {
-			return n
-		}
-	}
-
-	return 80 // Default
-}
 
 // ============================================================================
 // Watch Mode
@@ -2885,7 +2852,7 @@ func runWatchMode(ctx *watchContext) {
 
 	// Handle Ctrl+C
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigChan, shutdownSignals...)
 
 	// Debounce timer
 	var debounceTimer *time.Timer
