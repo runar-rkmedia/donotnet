@@ -45,9 +45,10 @@ The ⚡ indicator means `--no-build` was auto-detected as safe (build artifacts 
 1. Scans for all `.csproj` files in your git repo
 2. Builds a dependency graph from `<ProjectReference>` entries
 3. Computes a cache key from: git commit + dirty files + command + dotnet args
-4. Runs affected projects in parallel (defaults to CPU count workers)
-5. Skips projects that already passed with the same cache key
-6. Auto-detects when `--no-build` or `--no-restore` can be safely skipped
+4. Detects solutions and uses solution-level builds when beneficial (avoids parallel build conflicts)
+5. Runs affected projects in parallel (defaults to CPU count workers)
+6. Skips projects that already passed with the same cache key
+7. Auto-detects when `--no-build` or `--no-restore` can be safely skipped
 
 ### Options
 
@@ -59,8 +60,20 @@ donotnet -j 4 test                    # Use 4 parallel workers
 donotnet -k test                      # Keep going on errors (don't stop at first failure)
 donotnet -vcs-changed test            # Only test projects with uncommitted changes
 donotnet -vcs-ref=main test           # Only test projects changed vs main branch
+donotnet -failed test                 # Re-run only previously failed tests
+donotnet -solution test               # Force solution-level builds (when 2+ projects in a solution)
+donotnet -no-solution test            # Disable solution detection, build individual projects
+donotnet -dev-plan test               # Show job scheduling plan and exit (for debugging)
 donotnet test -- --filter "Name~Foo"  # Pass args to dotnet test
 ```
+
+### Solution detection
+
+By default, donotnet detects `.sln` files and uses solution-level builds when **all** projects in a solution need building. This lets MSBuild handle internal dependencies and avoids parallel build conflicts.
+
+- Default: Use solution only when all its projects need building
+- `-solution`: Use solution when 2+ projects in it need building
+- `-no-solution`: Always build individual projects
 
 ### Listing projects
 
@@ -93,3 +106,7 @@ donotnet -cache-clean=30           # Remove entries older than 30 days
 | `-vcs-changed`        | Only test uncommitted changes                            |
 | `-vcs-ref=REF`        | Only test changes vs ref                                 |
 | `-list-affected=TYPE` | List projects (all/tests/non-tests)                      |
+| `-failed`             | Re-run only previously failed tests                      |
+| `-solution`           | Force solution-level builds when 2+ projects match       |
+| `-no-solution`        | Disable solution detection, build individual projects    |
+| `-dev-plan`           | Show job scheduling plan and exit                        |

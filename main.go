@@ -106,6 +106,8 @@ var (
 	flagFailed             = flag.Bool("failed", false, "Only run projects that failed in the previous run")
 	flagDumpCache          = flag.String("dump-cache", "", "Dump cached output for a project (by name or path)")
 	flagDevPlan            = flag.Bool("dev-plan", false, "Show job scheduling plan based on dependencies and exit")
+	flagNoSolution         = flag.Bool("no-solution", false, "Disable solution-level builds, always build individual projects")
+	flagSolution           = flag.Bool("solution", false, "Force solution-level builds even for single projects")
 )
 
 func init() {
@@ -1030,6 +1032,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Find all solution files
+	solutions, err := findSolutions(scanRoot, gitRoot)
+	if err != nil {
+		term.Errorf("finding solutions: %v", err)
+		os.Exit(1)
+	}
+	term.Verbose("Found %d solutions", len(solutions))
+
 	// Set verbose, color and progress mode on terminal
 	term.SetVerbose(*flagVerbose)
 	switch *flagColor {
@@ -1321,7 +1331,7 @@ func main() {
 		if *flagWatch {
 			// Run initial test/build first
 			if len(targetProjects) > 0 {
-				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, nil)
+				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, nil, solutions)
 			} else {
 				term.Dim("No affected projects to %s (%d cached)%s", command, len(cachedProjects), formatExtraArgs(dotnetArgs))
 			}
@@ -1359,6 +1369,7 @@ func main() {
 				gitRoot:          gitRoot,
 				db:               db,
 				projects:         projects,
+				solutions:        solutions,
 				graph:            graph,
 				forwardGraph:     forwardGraph,
 				projectsByPath:   projectsByPath,
@@ -1404,7 +1415,7 @@ func main() {
 			return
 		}
 
-		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, failedTestFilters)
+		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, failedTestFilters, solutions)
 		if !success {
 			os.Exit(1)
 		}
@@ -1491,6 +1502,238 @@ func findProjects(scanRoot, gitRoot string) ([]*Project, error) {
 	})
 
 	return projects, err
+}
+
+// Solution represents a parsed .sln file
+type Solution struct {
+	Path     string            // absolute path to .sln
+	RelPath  string            // relative path from git root
+	Projects map[string]bool   // set of absolute project paths in this solution
+}
+
+// findSolutions finds all .sln files and parses their project references
+func findSolutions(scanRoot, gitRoot string) ([]*Solution, error) {
+	var solutions []*Solution
+
+	// Regex to match project lines in .sln files
+	// Project("{GUID}") = "Name", "Path\To\Project.csproj", "{GUID}"
+	slnProjectRegex := regexp.MustCompile(`Project\("[^"]+"\)\s*=\s*"[^"]+",\s*"([^"]+\.csproj)"`)
+
+	err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == "node_modules" || name == "bin" || name == "obj" || name == ".vs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".sln") {
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+
+			relPath, _ := filepath.Rel(gitRoot, path)
+			slnDir := filepath.Dir(path)
+			projects := make(map[string]bool)
+
+			matches := slnProjectRegex.FindAllStringSubmatch(string(content), -1)
+			for _, m := range matches {
+				projPath := m[1]
+				// Convert Windows path separators
+				projPath = strings.ReplaceAll(projPath, "\\", "/")
+				// Resolve to absolute path
+				absPath := filepath.Clean(filepath.Join(slnDir, projPath))
+				projects[absPath] = true
+			}
+
+			if len(projects) > 0 {
+				solutions = append(solutions, &Solution{
+					Path:     path,
+					RelPath:  relPath,
+					Projects: projects,
+				})
+			}
+		}
+		return nil
+	})
+
+	return solutions, err
+}
+
+// findCompleteSolutionMatches finds solutions where ALL projects in the solution need building
+// Returns: map of solution -> projects, and slice of projects not fully covered by any solution
+func findCompleteSolutionMatches(projects []*Project, solutions []*Solution, gitRoot string) (map[*Solution][]*Project, []*Project) {
+	// Build set of absolute project paths -> project
+	projectByPath := make(map[string]*Project)
+	for _, p := range projects {
+		absPath := filepath.Join(gitRoot, p.Path)
+		projectByPath[absPath] = p
+	}
+
+	// Track which projects are assigned to a solution
+	assigned := make(map[string]bool)
+	result := make(map[*Solution][]*Project)
+
+	// For each solution, check if ALL its projects are in our target list
+	for _, sln := range solutions {
+		allInTarget := true
+		var slnProjects []*Project
+		for projPath := range sln.Projects {
+			if p, ok := projectByPath[projPath]; ok {
+				slnProjects = append(slnProjects, p)
+			} else {
+				allInTarget = false
+				break
+			}
+		}
+		// Only use solution if ALL its projects need building AND it has 2+ projects
+		if allInTarget && len(slnProjects) >= 2 {
+			// Check none are already assigned
+			anyAssigned := false
+			for _, p := range slnProjects {
+				if assigned[p.Path] {
+					anyAssigned = true
+					break
+				}
+			}
+			if !anyAssigned {
+				result[sln] = slnProjects
+				for _, p := range slnProjects {
+					assigned[p.Path] = true
+				}
+			}
+		}
+	}
+
+	// Collect remaining unassigned projects
+	var remaining []*Project
+	for _, p := range projects {
+		if !assigned[p.Path] {
+			remaining = append(remaining, p)
+		}
+	}
+
+	return result, remaining
+}
+
+// groupProjectsBySolution groups projects by which solution contains them (for --solution flag)
+// Returns: map of solution -> projects in that solution, and slice of projects not in any solution
+func groupProjectsBySolution(projects []*Project, solutions []*Solution, gitRoot string) (map[*Solution][]*Project, []*Project) {
+	// Build set of absolute project paths -> project
+	projectByPath := make(map[string]*Project)
+	for _, p := range projects {
+		absPath := filepath.Join(gitRoot, p.Path)
+		projectByPath[absPath] = p
+	}
+
+	// Track which projects are assigned to a solution
+	assigned := make(map[string]bool)
+	result := make(map[*Solution][]*Project)
+
+	// For each solution, find which of our target projects it contains
+	// Prefer solutions that contain more projects
+	type slnMatch struct {
+		sln      *Solution
+		projects []*Project
+	}
+	var matches []slnMatch
+
+	for _, sln := range solutions {
+		var slnProjects []*Project
+		for projPath := range sln.Projects {
+			if p, ok := projectByPath[projPath]; ok {
+				slnProjects = append(slnProjects, p)
+			}
+		}
+		if len(slnProjects) >= 2 {
+			matches = append(matches, slnMatch{sln: sln, projects: slnProjects})
+		}
+	}
+
+	// Sort by number of projects (descending) to prefer larger solutions
+	sort.Slice(matches, func(i, j int) bool {
+		return len(matches[i].projects) > len(matches[j].projects)
+	})
+
+	// Assign projects to solutions, avoiding duplicates
+	for _, m := range matches {
+		var unassigned []*Project
+		for _, p := range m.projects {
+			if !assigned[p.Path] {
+				unassigned = append(unassigned, p)
+			}
+		}
+		if len(unassigned) >= 2 {
+			result[m.sln] = unassigned
+			for _, p := range unassigned {
+				assigned[p.Path] = true
+			}
+		}
+	}
+
+	// Collect remaining unassigned projects
+	var remaining []*Project
+	for _, p := range projects {
+		if !assigned[p.Path] {
+			remaining = append(remaining, p)
+		}
+	}
+
+	return result, remaining
+}
+
+// findCommonSolution returns a solution that contains all the given projects, or nil if none exists
+func findCommonSolution(projects []*Project, solutions []*Solution, gitRoot string) *Solution {
+	if len(solutions) == 0 || len(projects) == 0 {
+		term.Verbose("findCommonSolution: no solutions (%d) or no projects (%d)", len(solutions), len(projects))
+		return nil
+	}
+
+	term.Verbose("findCommonSolution: checking %d solutions for %d projects", len(solutions), len(projects))
+
+	// Build set of absolute project paths
+	projectPaths := make(map[string]bool)
+	for _, p := range projects {
+		absPath := filepath.Join(gitRoot, p.Path)
+		projectPaths[absPath] = true
+		term.Verbose("  project: %s", absPath)
+	}
+
+	// Find a solution that contains ALL projects
+	for _, sln := range solutions {
+		term.Verbose("  checking solution: %s (%d projects)", sln.RelPath, len(sln.Projects))
+		allFound := true
+		var missing string
+		for projPath := range projectPaths {
+			if !sln.Projects[projPath] {
+				allFound = false
+				missing = projPath
+				break
+			}
+		}
+		if allFound {
+			term.Verbose("  -> matched!")
+			return sln
+		} else {
+			term.Verbose("  -> missing: %s", missing)
+			// Show first few solution projects for debugging
+			i := 0
+			for sp := range sln.Projects {
+				if i >= 3 {
+					term.Verbose("       ... and %d more", len(sln.Projects)-3)
+					break
+				}
+				term.Verbose("       has: %s", sp)
+				i++
+			}
+		}
+	}
+
+	return nil
 }
 
 var projectRefRegex = regexp.MustCompile(`<ProjectReference\s+Include="([^"]+)"`)
@@ -1868,12 +2111,391 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, db *bolt.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter, failedTestFilters map[string]string) bool {
+// runSolutionCommand runs a dotnet command on the entire solution instead of individual projects
+// This avoids parallel build conflicts when projects share dependencies
+func runSolutionCommand(command string, sln *Solution, projects []*Project, extraArgs []string, root string, db *bolt.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, failedTestFilters map[string]string) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle Ctrl+C
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, shutdownSignals...)
+	go func() {
+		<-sigChan
+		term.Warn("\nInterrupted, killing processes...")
+		cancel()
+	}()
+	defer signal.Stop(sigChan)
+
+	startTime := time.Now()
+
+	// Build args string for caching
+	argsForCache := strings.Join(append([]string{command}, extraArgs...), " ")
+
+	if !*flagQuiet {
+		// Build status line
+		var parts []string
+		parts = append(parts, fmt.Sprintf("Running %s on solution %s", command, filepath.Base(sln.RelPath)))
+		parts = append(parts, fmt.Sprintf("%d projects", len(projects)))
+		if len(cachedProjects) > 0 {
+			parts = append(parts, fmt.Sprintf("%d cached", len(cachedProjects)))
+		}
+
+		// Add extra args if any
+		displayArgs := filterDisplayArgs(extraArgs)
+		if len(displayArgs) > 0 {
+			argsStr := strings.Join(displayArgs, " ")
+			if term.IsPlain() {
+				parts = append(parts, argsStr)
+			} else {
+				parts = append(parts, colorYellow+argsStr+colorReset)
+			}
+		}
+
+		term.Printf("%s...\n", strings.Join(parts, ", "))
+	}
+
+	// Build command args
+	slnPath := filepath.Join(root, sln.RelPath)
+	args := []string{command, slnPath, "--property:WarningLevel=0"}
+	args = append(args, extraArgs...)
+
+	cmd := exec.CommandContext(ctx, "dotnet", args...)
+	setupProcessGroup(cmd)
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	cmd.Dir = root
+
+	if term.IsPlain() {
+		cmd.Env = os.Environ()
+	} else {
+		cmd.Env = append(os.Environ(),
+			"DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION=1",
+			"TERM=xterm-256color",
+		)
+	}
+
+	term.Verbose("  dotnet %s", strings.Join(args, " "))
+
+	err := cmd.Run()
+	duration := time.Since(startTime)
+	outputStr := output.String()
+	success := err == nil
+
+	// Add error details if command failed
+	if err != nil {
+		term.Verbose("  command error: %v", err)
+		if outputStr == "" {
+			outputStr = fmt.Sprintf("Command failed: %v\n", err)
+		}
+	}
+
+	// Save console output if reports enabled
+	if !*flagNoReports {
+		consolePath := filepath.Join(reportsDir, filepath.Base(sln.RelPath)+".log")
+		os.WriteFile(consolePath, []byte(outputStr), 0644)
+	}
+
+	// Extract stats from output
+	stats := extractTestStats(outputStr)
+
+	if !*flagQuiet {
+		if success {
+			if stats != "" {
+				term.Printf("  %s✓%s %s %s  %s\n", colorGreen, colorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond), stats)
+			} else {
+				term.Printf("  %s✓%s %s %s\n", colorGreen, colorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond))
+			}
+		} else {
+			if stats != "" {
+				term.Printf("  %s✗%s %s %s  %s\n", colorRed, colorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond), stats)
+			} else {
+				term.Printf("  %s✗%s %s %s\n", colorRed, colorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond))
+			}
+			term.Printf("\n%s\n", outputStr)
+		}
+	}
+
+	// Mark cache for all projects in the solution
+	now := time.Now()
+	for _, p := range projects {
+		relevantDirs := getProjectRelevantDirs(p, forwardGraph)
+		contentHash := computeContentHash(root, relevantDirs)
+		key := makeCacheKey(contentHash, argsHash, p.Path)
+		markCacheResult(db, key, now, success, nil, argsForCache)
+	}
+
+	if !*flagQuiet {
+		succeeded := 0
+		if success {
+			succeeded = len(projects)
+		}
+		term.Summary(succeeded, len(projects), len(cachedProjects), duration.Round(time.Millisecond), success)
+	}
+
+	return success
+}
+
+// runSolutionGroups runs multiple solution builds in parallel, then builds remaining projects.
+// Used when some projects can be built via solutions and others must be built individually.
+func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remaining []*Project, extraArgs []string, root string, db *bolt.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter, failedTestFilters map[string]string, solutions []*Solution) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle Ctrl+C
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, shutdownSignals...)
+	go func() {
+		<-sigChan
+		term.Warn("\nInterrupted, killing processes...")
+		cancel()
+	}()
+	defer signal.Stop(sigChan)
+
+	startTime := time.Now()
+	argsForCache := strings.Join(append([]string{command}, extraArgs...), " ")
+
+	// Count total projects across all solutions + remaining
+	totalSolutionProjects := 0
+	for _, projs := range slnGroups {
+		totalSolutionProjects += len(projs)
+	}
+	totalProjects := totalSolutionProjects + len(remaining)
+
+	if !*flagQuiet {
+		var parts []string
+		parts = append(parts, fmt.Sprintf("Running %s on %d solutions (%d projects)", command, len(slnGroups), totalSolutionProjects))
+		if len(remaining) > 0 {
+			parts = append(parts, fmt.Sprintf("+%d individual", len(remaining)))
+		}
+		if len(cachedProjects) > 0 {
+			parts = append(parts, fmt.Sprintf("%d cached", len(cachedProjects)))
+		}
+		displayArgs := filterDisplayArgs(extraArgs)
+		if len(displayArgs) > 0 {
+			argsStr := strings.Join(displayArgs, " ")
+			if term.IsPlain() {
+				parts = append(parts, argsStr)
+			} else {
+				parts = append(parts, colorYellow+argsStr+colorReset)
+			}
+		}
+		term.Printf("%s...\n", strings.Join(parts, ", "))
+	}
+
+	// Run solution builds in parallel
+	type slnResult struct {
+		sln      *Solution
+		projects []*Project
+		success  bool
+		output   string
+		duration time.Duration
+	}
+
+	slnResults := make(chan slnResult, len(slnGroups))
+	var wg sync.WaitGroup
+
+	numWorkers := *flagParallel
+	if numWorkers <= 0 {
+		numWorkers = runtime.GOMAXPROCS(0)
+	}
+	if numWorkers > len(slnGroups) {
+		numWorkers = len(slnGroups)
+	}
+
+	slnJobs := make(chan struct {
+		sln   *Solution
+		projs []*Project
+	}, len(slnGroups))
+
+	// Start solution workers
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range slnJobs {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				slnStart := time.Now()
+				slnPath := filepath.Join(root, job.sln.RelPath)
+				args := []string{command, slnPath, "--property:WarningLevel=0"}
+				args = append(args, extraArgs...)
+
+				cmd := exec.CommandContext(ctx, "dotnet", args...)
+				setupProcessGroup(cmd)
+
+				var output bytes.Buffer
+				cmd.Stdout = &output
+				cmd.Stderr = &output
+				cmd.Dir = root
+
+				if term.IsPlain() {
+					cmd.Env = os.Environ()
+				} else {
+					cmd.Env = append(os.Environ(),
+						"DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION=1",
+						"TERM=xterm-256color",
+					)
+				}
+
+				term.Verbose("  dotnet %s", strings.Join(args, " "))
+				err := cmd.Run()
+
+				slnResults <- slnResult{
+					sln:      job.sln,
+					projects: job.projs,
+					success:  err == nil,
+					output:   output.String(),
+					duration: time.Since(slnStart),
+				}
+			}
+		}()
+	}
+
+	// Send all solution jobs
+	for sln, projs := range slnGroups {
+		slnJobs <- struct {
+			sln   *Solution
+			projs []*Project
+		}{sln, projs}
+	}
+	close(slnJobs)
+
+	// Wait for workers to finish
+	go func() {
+		wg.Wait()
+		close(slnResults)
+	}()
+
+	// Collect solution results
+	slnSucceeded := 0
+	slnFailed := 0
+	var failedOutputs []string
+
+	for r := range slnResults {
+		// Save console output if reports enabled
+		if !*flagNoReports {
+			consolePath := filepath.Join(reportsDir, filepath.Base(r.sln.RelPath)+".log")
+			os.WriteFile(consolePath, []byte(r.output), 0644)
+		}
+
+		stats := extractTestStats(r.output)
+
+		if !*flagQuiet {
+			if r.success {
+				if stats != "" {
+					term.Printf("  %s✓%s %s %s  %s\n", colorGreen, colorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond), stats)
+				} else {
+					term.Printf("  %s✓%s %s %s\n", colorGreen, colorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond))
+				}
+			} else {
+				if stats != "" {
+					term.Printf("  %s✗%s %s %s  %s\n", colorRed, colorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond), stats)
+				} else {
+					term.Printf("  %s✗%s %s %s\n", colorRed, colorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond))
+				}
+				failedOutputs = append(failedOutputs, fmt.Sprintf("=== %s ===\n%s", filepath.Base(r.sln.RelPath), r.output))
+			}
+		}
+
+		// Update cache for all projects in the solution
+		now := time.Now()
+		for _, p := range r.projects {
+			relevantDirs := getProjectRelevantDirs(p, forwardGraph)
+			contentHash := computeContentHash(root, relevantDirs)
+			key := makeCacheKey(contentHash, argsHash, p.Path)
+			markCacheResult(db, key, now, r.success, nil, argsForCache)
+		}
+
+		if r.success {
+			slnSucceeded += len(r.projects)
+		} else {
+			slnFailed += len(r.projects)
+			if !*flagKeepGoing {
+				cancel()
+				term.Printf("\n%s\n", r.output)
+				term.Summary(slnSucceeded, totalProjects, len(cachedProjects), time.Since(startTime).Round(time.Millisecond), false)
+				return false
+			}
+		}
+	}
+
+	// If all solutions failed or were cancelled, we're done
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+
+	// Run remaining individual projects if any
+	if len(remaining) > 0 {
+		if !*flagQuiet {
+			term.Printf("\nBuilding %d individual projects...\n", len(remaining))
+		}
+		// Use the standard project runner for remaining projects (pass nil for solutions to avoid re-checking)
+		projSuccess := runDotnetCommand(command, remaining, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, nil, reportsDir, testFilter, failedTestFilters, nil)
+		if !projSuccess {
+			return false
+		}
+		slnSucceeded += len(remaining)
+	}
+
+	// Print any failed solution outputs
+	if len(failedOutputs) > 0 && *flagKeepGoing && !*flagQuiet {
+		term.Printf("\n--- Solution Failure Output ---\n")
+		for _, o := range failedOutputs {
+			term.Printf("\n%s\n", o)
+		}
+	}
+
+	if !*flagQuiet && len(remaining) == 0 {
+		// Only print summary if we didn't run remaining projects (which prints its own summary)
+		term.Summary(slnSucceeded, totalProjects, len(cachedProjects), time.Since(startTime).Round(time.Millisecond), slnFailed == 0)
+	}
+
+	return slnFailed == 0
+}
+
+func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, db *bolt.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter, failedTestFilters map[string]string, solutions []*Solution) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Build args string for caching
 	argsForCache := strings.Join(append([]string{command}, extraArgs...), " ")
+
+	// Check if we can build/test at solution level instead of individual projects
+	// This avoids parallel build conflicts when projects share dependencies
+	//
+	// Default behavior: use solution only if ALL projects in that solution need building
+	// With --solution: use solution if 2+ projects in that solution need building
+	// With --no-solution: never use solutions
+	if !*flagNoSolution && len(projects) > 1 {
+		// First try: single solution containing all projects
+		if sln := findCommonSolution(projects, solutions, root); sln != nil {
+			return runSolutionCommand(command, sln, projects, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, failedTestFilters)
+		}
+
+		// Second try: find solutions where ALL their projects need building (default)
+		// or where 2+ projects need building (with --solution flag)
+		var slnGroups map[*Solution][]*Project
+		var remaining []*Project
+		if *flagSolution {
+			slnGroups, remaining = groupProjectsBySolution(projects, solutions, root)
+		} else {
+			slnGroups, remaining = findCompleteSolutionMatches(projects, solutions, root)
+		}
+
+		if len(slnGroups) > 0 {
+			// Run solution builds in parallel, then remaining projects
+			return runSolutionGroups(command, slnGroups, remaining, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, testFilter, failedTestFilters, solutions)
+		}
+	}
 
 	// Handle Ctrl+C to kill all running processes
 	sigChan := make(chan os.Signal, 1)
@@ -2685,6 +3307,7 @@ type watchContext struct {
 	gitRoot          string
 	db               *bolt.DB
 	projects         []*Project
+	solutions        []*Solution
 	graph            map[string][]string // reverse dependency graph
 	forwardGraph     map[string][]string
 	projectsByPath   map[string]*Project
@@ -3302,7 +3925,7 @@ func runWatchMode(ctx *watchContext) {
 
 		term.Println()
 
-		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir, testFilter, nil)
+		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir, testFilter, nil, ctx.solutions)
 
 		term.Info("\nWatching for changes...")
 	}
