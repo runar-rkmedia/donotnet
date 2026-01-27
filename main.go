@@ -1697,6 +1697,10 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 						hasFilters = true
 					}
 					prettyPrintFilter(p.Name, result.TestFilter)
+					// Show reason as informational note (e.g., safety check results)
+					if strings.Contains(result.Reason, "TestFileOnly") || strings.Contains(result.Reason, "not referenced") {
+						term.Verbose("    (%s)", result.Reason)
+					}
 				}
 			}
 			if hasFilters {

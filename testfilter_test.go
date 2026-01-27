@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -220,29 +222,23 @@ func TestParseHeuristics(t *testing.T) {
 		t.Errorf("expected %d heuristics, got %d", expectedCount, len(h))
 	}
 
-	// Test that "default" returns empty list (no heuristics are safe by default)
+	// Test that "default" returns empty (no heuristics enabled by default)
 	h = ParseHeuristics("default")
 	if len(h) != 0 {
-		t.Errorf("expected 0 heuristics for 'default' (empty AvailableHeuristics), got %d", len(h))
-	}
-
-	// Test disabling non-existent heuristic from defaults (shouldn't error)
-	h = ParseHeuristics("default,-NonExistent")
-	if len(h) != 0 {
-		t.Errorf("expected 0 heuristics when disabling non-existent from empty defaults, got %d", len(h))
+		t.Errorf("expected 0 heuristics for 'default', got %d", len(h))
 	}
 
 	// Test adding opt-in heuristic
-	h = ParseHeuristics("ExtensionsToBase")
+	h = ParseHeuristics("TestFileOnly")
 	if len(h) != 1 {
-		t.Errorf("expected 1 heuristic for opt-in only, got %d", len(h))
+		t.Errorf("expected 1 heuristic for opt-in, got %d", len(h))
 	}
-	if len(h) > 0 && h[0].Name != "ExtensionsToBase" {
-		t.Errorf("expected ExtensionsToBase, got %s", h[0].Name)
+	if len(h) > 0 && h[0].Name != "TestFileOnly" {
+		t.Errorf("expected TestFileOnly, got %s", h[0].Name)
 	}
 
-	// Test combining default (empty) with opt-in
-	h = ParseHeuristics("default,TestFileOnly,NameToNameTests")
+	// Test combining multiple opt-in heuristics
+	h = ParseHeuristics("TestFileOnly,NameToNameTests")
 	if len(h) != 2 {
 		t.Errorf("expected 2 heuristics, got %d", len(h))
 	}
@@ -369,5 +365,108 @@ func TestGetFilterWithCoverage_MixedChanges(t *testing.T) {
 	// Should include both the coverage-based test AND the test class from the test file change
 	if len(result.TestClasses) < 2 {
 		t.Errorf("expected at least 2 test classes, got %d: %v", len(result.TestClasses), result.TestClasses)
+	}
+}
+
+func TestIsSafeTestFile_HelperName(t *testing.T) {
+	// Create a temp directory with a test helper file
+	tmpDir := t.TempDir()
+
+	// Create a file with "Helper" in the name
+	helperFile := filepath.Join(tmpDir, "TestHelper.cs")
+	helperContent := `
+using NUnit.Framework;
+public class TestHelper {
+    [Test]
+    public void SomeTest() { }
+}
+`
+	os.WriteFile(helperFile, []byte(helperContent), 0644)
+
+	result := IsSafeTestFile(helperFile, tmpDir)
+
+	if result.IsSafe {
+		t.Errorf("expected file with 'Helper' in name to be unsafe, got safe")
+	}
+	if !strings.Contains(result.Reason, "helper") && !strings.Contains(result.Reason, "Helper") {
+		t.Errorf("expected reason to mention helper, got: %s", result.Reason)
+	}
+}
+
+func TestIsSafeTestFile_NoTestMethods(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a file without test methods (just a class with no tests)
+	noTestFile := filepath.Join(tmpDir, "ServiceTests.cs")
+	noTestContent := `
+public class ServiceTests {
+    protected void SetupSomething() { }
+}
+`
+	os.WriteFile(noTestFile, []byte(noTestContent), 0644)
+
+	result := IsSafeTestFile(noTestFile, tmpDir)
+
+	if result.IsSafe {
+		t.Errorf("expected file without test methods to be unsafe, got safe")
+	}
+	if !strings.Contains(result.Reason, "no test methods") {
+		t.Errorf("expected reason to mention no test methods, got: %s", result.Reason)
+	}
+}
+
+func TestIsSafeTestFile_WithTestMethods(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a proper test file
+	testFile := filepath.Join(tmpDir, "ServiceTests.cs")
+	testContent := `
+using NUnit.Framework;
+public class ServiceTests {
+    [Test]
+    public void TestSomething() { }
+}
+`
+	os.WriteFile(testFile, []byte(testContent), 0644)
+
+	result := IsSafeTestFile(testFile, tmpDir)
+
+	if !result.IsSafe {
+		t.Errorf("expected test file with test methods to be safe, got unsafe. Reason: %s", result.Reason)
+	}
+}
+
+func TestIsSafeTestFile_ReferencedByOther(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a base test class
+	baseFile := filepath.Join(tmpDir, "IntegrationTests.cs")
+	baseContent := `
+using NUnit.Framework;
+public class IntegrationTests {
+    [Test]
+    public void TestIntegration() { }
+}
+`
+	os.WriteFile(baseFile, []byte(baseContent), 0644)
+
+	// Create another test file that references the base class
+	otherFile := filepath.Join(tmpDir, "ServiceIntegrationTests.cs")
+	otherContent := `
+using NUnit.Framework;
+public class ServiceIntegrationTests : IntegrationTests {
+    [Test]
+    public void TestService() { }
+}
+`
+	os.WriteFile(otherFile, []byte(otherContent), 0644)
+
+	result := IsSafeTestFile(baseFile, tmpDir)
+
+	if result.IsSafe {
+		t.Errorf("expected file referenced by other test file to be unsafe, got safe")
+	}
+	if !strings.Contains(result.Reason, "referenced") {
+		t.Errorf("expected reason to mention referenced, got: %s", result.Reason)
 	}
 }
