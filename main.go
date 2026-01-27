@@ -1957,7 +1957,36 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 				// Check if our test filter resulted in 0 matching tests - retry with just user filter
 				if filteredTests && strings.Contains(outputStr, "No test matches the given testcase filter") {
-					term.Warnf("  [%s] filter matched 0 tests, retrying without heuristic filter", p.Name)
+					term.Warnf("  [%s] heuristic filter matched 0 tests, retrying without it", p.Name)
+					term.Verbose("    tried: %s", strings.Join(testClasses, ", "))
+
+					// List actual test names to help debug why filter didn't match (verbose only)
+					if term.IsVerbose() {
+						listCmd := exec.CommandContext(ctx, "dotnet", "test", projectPath, "--list-tests", "--no-build")
+						listOutput, listErr := listCmd.Output()
+						if listErr == nil {
+							// Parse test names from output (format: "    FullyQualifiedName")
+							lines := strings.Split(string(listOutput), "\n")
+							var testNames []string
+							inTestList := false
+							for _, line := range lines {
+								line = strings.TrimSpace(line)
+								if strings.HasPrefix(line, "The following Tests are available:") {
+									inTestList = true
+									continue
+								}
+								if inTestList && line != "" && !strings.HasPrefix(line, "Test run") {
+									testNames = append(testNames, line)
+								}
+							}
+							if len(testNames) > 0 {
+								term.Verbose("    actual tests in project (%d):", len(testNames))
+								for _, name := range testNames {
+									term.Verbose("      %s", name)
+								}
+							}
+						}
+					}
 
 					// Build retry args: use saved args + user filter only
 					retryArgs := make([]string, len(argsBeforeOurFilter))

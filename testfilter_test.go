@@ -46,7 +46,8 @@ func TestGetFilterWithCoverage(t *testing.T) {
 }
 
 func TestGetFilterWithCoverage_UncoveredFile(t *testing.T) {
-	// When a file is NOT in coverage map, should fdefault back to heuristics
+	// When a file is NOT in coverage map and is not a test file,
+	// with default heuristics (TestFileOnly), should NOT filter (safe behavior)
 	covMap := &TestCoverageMap{
 		Project: "MyLib.Tests",
 		FileToTests: map[string][]string{
@@ -59,6 +60,33 @@ func TestGetFilterWithCoverage_UncoveredFile(t *testing.T) {
 		"MyLib.Tests": covMap,
 	})
 
+	// Add a changed file that's NOT in coverage (and not a test file)
+	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/NewFile.cs")
+
+	// Get filter - with only TestFileOnly heuristic, non-test files can't filter
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+
+	if result.CanFilter {
+		t.Errorf("expected CanFilter=false for uncovered non-test file, got true")
+	}
+}
+
+func TestGetFilterWithCoverage_UncoveredFile_WithHeuristics(t *testing.T) {
+	// When a file is NOT in coverage map but we enable guessing heuristics
+	covMap := &TestCoverageMap{
+		Project: "MyLib.Tests",
+		FileToTests: map[string][]string{
+			"src/MyLib/Service.cs": {"MyLib.Tests.ServiceTests.TestMethod1"},
+		},
+	}
+
+	tf := NewTestFilter()
+	tf.SetCoverageMaps(map[string]*TestCoverageMap{
+		"MyLib.Tests": covMap,
+	})
+	// Enable NameToNameTests heuristic for guessing
+	tf.SetHeuristics(ParseHeuristics("NameToNameTests"))
+
 	// Add a changed file that's NOT in coverage
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/NewFile.cs")
 
@@ -66,7 +94,7 @@ func TestGetFilterWithCoverage_UncoveredFile(t *testing.T) {
 	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
 
 	if !result.CanFilter {
-		t.Errorf("expected CanFilter=true with heuristics fdefaultback, got false. Reason: %s", result.Reason)
+		t.Errorf("expected CanFilter=true with NameToNameTests heuristic, got false. Reason: %s", result.Reason)
 	}
 
 	// Should use heuristic naming
@@ -87,11 +115,27 @@ func TestGetFilterWithCoverage_NoCoverageMap(t *testing.T) {
 	// Add a changed non-test file
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Service.cs")
 
+	// Get filter - with only TestFileOnly heuristic, non-test files can't filter
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+
+	if result.CanFilter {
+		t.Errorf("expected CanFilter=false for non-test file with default heuristics, got true")
+	}
+}
+
+func TestGetFilterWithCoverage_NoCoverageMap_WithHeuristics(t *testing.T) {
+	tf := NewTestFilter()
+	// No coverage maps set, but enable guessing heuristics
+	tf.SetHeuristics(ParseHeuristics("NameToNameTests"))
+
+	// Add a changed non-test file
+	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Service.cs")
+
 	// Get filter - should use heuristics (Service.cs -> ServiceTests)
 	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
 
 	if !result.CanFilter {
-		t.Errorf("expected CanFilter=true with heuristics, got false. Reason: %s", result.Reason)
+		t.Errorf("expected CanFilter=true with NameToNameTests heuristic, got false. Reason: %s", result.Reason)
 	}
 
 	// Should use heuristic naming
@@ -176,30 +220,31 @@ func TestParseHeuristics(t *testing.T) {
 		t.Errorf("expected %d heuristics, got %d", expectedCount, len(h))
 	}
 
-	// Test disabling a default heuristic
-	h = ParseHeuristics("default,-DirToNamespace")
-	expectedCount = len(AvailableHeuristics) - 1
-	if len(h) != expectedCount {
-		t.Errorf("expected %d heuristics for 'default,-DirToNamespace', got %d", expectedCount, len(h))
-	}
-	// Verify DirToNamespace is not in the result
-	for _, heuristic := range h {
-		if heuristic.Name == "DirToNamespace" {
-			t.Error("DirToNamespace should have been disabled")
-		}
-	}
-
-	// Test disabling multiple
-	h = ParseHeuristics("default,-NameToNameTests,-DirToNamespace")
+	// Test that "default" returns empty list (no heuristics are safe by default)
+	h = ParseHeuristics("default")
 	if len(h) != 0 {
-		t.Errorf("expected 0 heuristics when all defaults disabled, got %d", len(h))
+		t.Errorf("expected 0 heuristics for 'default' (empty AvailableHeuristics), got %d", len(h))
 	}
 
-	// Test adding opt-in while disabling default
-	h = ParseHeuristics("default,-DirToNamespace,ExtensionsToBase")
-	expectedCount = len(AvailableHeuristics) - 1 + 1 // minus DirToNamespace, plus ExtensionsToBase
-	if len(h) != expectedCount {
-		t.Errorf("expected %d heuristics, got %d", expectedCount, len(h))
+	// Test disabling non-existent heuristic from defaults (shouldn't error)
+	h = ParseHeuristics("default,-NonExistent")
+	if len(h) != 0 {
+		t.Errorf("expected 0 heuristics when disabling non-existent from empty defaults, got %d", len(h))
+	}
+
+	// Test adding opt-in heuristic
+	h = ParseHeuristics("ExtensionsToBase")
+	if len(h) != 1 {
+		t.Errorf("expected 1 heuristic for opt-in only, got %d", len(h))
+	}
+	if len(h) > 0 && h[0].Name != "ExtensionsToBase" {
+		t.Errorf("expected ExtensionsToBase, got %s", h[0].Name)
+	}
+
+	// Test combining default (empty) with opt-in
+	h = ParseHeuristics("default,TestFileOnly,NameToNameTests")
+	if len(h) != 2 {
+		t.Errorf("expected 2 heuristics, got %d", len(h))
 	}
 }
 
@@ -272,7 +317,9 @@ func TestGetFilterWithHeuristics_Disabled(t *testing.T) {
 
 func TestGetFilterWithHeuristics_DirectoryNamespace(t *testing.T) {
 	// Test that directory names are included in the heuristic filter
+	// when NameToNameTests and DirToNamespace heuristics are enabled
 	tf := NewTestFilter()
+	tf.SetHeuristics(ParseHeuristics("NameToNameTests,DirToNamespace"))
 
 	// Add a file in a subdirectory
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Cache/CacheManager.cs")

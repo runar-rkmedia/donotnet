@@ -370,20 +370,36 @@ type TestHeuristic struct {
 	Apply func(fileName, dirName string) []string
 }
 
-// AvailableHeuristics lists all available test-filtering heuristics
-// The first two are enabled by default, the rest are opt-in
-var AvailableHeuristics = []TestHeuristic{
-	// Default heuristics (enabled with "all")
+// AvailableHeuristics lists heuristics enabled by default
+// Empty by default - even TestFileOnly isn't truly safe since test files can be helpers
+// used by other test files
+var AvailableHeuristics = []TestHeuristic{}
+
+// OptInHeuristics are heuristics that must be explicitly enabled via --heuristics flag
+// These guess test names from source file names - useful but can be wrong
+var OptInHeuristics = []TestHeuristic{
+	{
+		Name:        "TestFileOnly",
+		Description: "FooTests.cs -> FooTests (only runs if test file changed; may miss tests that depend on test helpers)",
+		Apply: func(fileName, dirName string) []string {
+			// Only return the file if it's already a test file
+			// For non-test files, return nil - meaning we can't determine what tests to run
+			if strings.HasSuffix(fileName, "Tests") || strings.HasSuffix(fileName, "Test") {
+				return []string{fileName}
+			}
+			return nil
+		},
+	},
 	{
 		Name:        "NameToNameTests",
-		Description: "Foo.cs -> FooTests (direct name match, ~79% accurate)",
+		Description: "Foo.cs -> FooTests (direct name match, can miss or run wrong tests)",
 		Apply: func(fileName, dirName string) []string {
 			return []string{fileName + "Tests"}
 		},
 	},
 	{
 		Name:        "DirToNamespace",
-		Description: "Cache/Foo.cs -> .Cache.FooTests (directory as namespace)",
+		Description: "Cache/Foo.cs -> .Cache.Foo (matches tests with directory as namespace)",
 		Apply: func(fileName, dirName string) []string {
 			if dirName != "" && dirName != "Source" && dirName != "src" {
 				return []string{"." + dirName + "." + fileName}
@@ -391,13 +407,9 @@ var AvailableHeuristics = []TestHeuristic{
 			return nil
 		},
 	},
-}
-
-// OptInHeuristics are additional heuristics that must be explicitly enabled
-var OptInHeuristics = []TestHeuristic{
 	{
 		Name:        "ExtensionsToBase",
-		Description: "FooExtensions.cs -> FooTests (extension methods with base class)",
+		Description: "FooExtensions.cs -> FooTests (assumes extension methods are tested with base class)",
 		Apply: func(fileName, dirName string) []string {
 			if strings.HasSuffix(fileName, "Extensions") {
 				base := strings.TrimSuffix(fileName, "Extensions")
@@ -430,8 +442,9 @@ var OptInHeuristics = []TestHeuristic{
 }
 
 // DefaultHeuristics returns the names of heuristics enabled by default
+// Empty by default - heuristics can miss tests or run wrong tests
 func DefaultHeuristics() []string {
-	return []string{"NameToNameTests", "DirToNamespace"}
+	return []string{}
 }
 
 // AllHeuristics returns all heuristics (default + opt-in)
