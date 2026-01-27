@@ -2,6 +2,8 @@ package main
 
 import (
 	"strings"
+
+	"github.com/runar-rkmedia/donotnet/term"
 )
 
 // Suggestion represents a performance or best-practice suggestion
@@ -110,13 +112,13 @@ func PrintSuggestions(suggestions []Suggestion) {
 				term.Printf("\n   See: %s\n", s.Link)
 			}
 		} else {
-			term.Printf("\n%s💡 TIP:%s %s\n", colorYellow, colorReset, s.Title)
-			term.Printf("%s   %s%s\n", colorDim, s.Description, colorReset)
+			term.Printf("\n%s💡 TIP:%s %s\n", term.ColorYellow, term.ColorReset, s.Title)
+			term.Printf("%s   %s%s\n", term.ColorDim, s.Description, term.ColorReset)
 			if len(s.Projects) > 0 {
-				term.Printf("\n%s   Affected:%s %s\n", colorDim, colorReset, strings.Join(s.Projects, ", "))
+				term.Printf("\n%s   Affected:%s %s\n", term.ColorDim, term.ColorReset, strings.Join(s.Projects, ", "))
 			}
 			if s.Link != "" {
-				term.Printf("\n%s   See:%s %s\n", colorDim, colorReset, s.Link)
+				term.Printf("\n%s   See:%s %s\n", term.ColorDim, term.ColorReset, s.Link)
 			}
 		}
 	}

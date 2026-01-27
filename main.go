@@ -27,8 +27,8 @@ import (
 	"github.com/runar-rkmedia/donotnet/devplan"
 	"github.com/runar-rkmedia/donotnet/git"
 	"github.com/runar-rkmedia/donotnet/project"
+	"github.com/runar-rkmedia/donotnet/term"
 	"github.com/runar-rkmedia/donotnet/testresults"
-	ignore "github.com/sabhiram/go-gitignore"
 )
 
 func getBuildInfo() (version, vcsRevision, vcsTime, vcsModified string) {
@@ -149,208 +149,6 @@ Examples:
 
 // isNonBuildFile returns true if the file should be ignored for cache hashing
 // (files that don't affect compilation output)
-func isNonBuildFile(name string) bool {
-	lower := strings.ToLower(name)
-	// Documentation and readme files
-	if strings.HasPrefix(lower, "readme") || strings.HasSuffix(lower, ".md") {
-		return true
-	}
-	// CI/CD pipeline files
-	if lower == "azure-pipelines.yml" || lower == ".gitlab-ci.yml" ||
-		strings.HasPrefix(lower, "jenkinsfile") || lower == "dockerfile" ||
-		lower == "docker-compose.yml" || lower == "docker-compose.yaml" ||
-		lower == ".dockerignore" {
-		return true
-	}
-	// Editor and IDE config
-	if lower == ".editorconfig" || lower == ".gitattributes" {
-		return true
-	}
-	return false
-}
-
-func computeContentHash(root string, dirs []string) string {
-	h := sha256.New()
-
-	// Try to load .gitignore from root
-	var gitIgnore *ignore.GitIgnore
-	gitignorePath := filepath.Join(root, ".gitignore")
-	if gi, err := ignore.CompileIgnoreFile(gitignorePath); err == nil {
-		gitIgnore = gi
-	}
-
-	// Collect all source files
-	var files []string
-	for _, dir := range dirs {
-		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-
-			name := d.Name()
-
-			// Always skip these directories
-			if d.IsDir() {
-				if name == "bin" || name == "obj" || name == ".git" || name == "node_modules" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			// Check gitignore
-			if gitIgnore != nil {
-				relPath, err := filepath.Rel(root, path)
-				if err == nil && gitIgnore.MatchesPath(relPath) {
-					return nil
-				}
-			}
-
-			// Skip non-build files
-			if isNonBuildFile(name) {
-				return nil
-			}
-
-			// Only include source files that affect compilation
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext == ".cs" || ext == ".csproj" || ext == ".razor" || ext == ".props" || ext == ".targets" {
-				files = append(files, path)
-			}
-			return nil
-		})
-	}
-
-	if len(files) == 0 {
-		return ""
-	}
-
-	// Sort for deterministic ordering
-	sort.Strings(files)
-
-	for _, f := range files {
-		h.Write([]byte(f))
-		h.Write([]byte{0})
-
-		content, err := os.ReadFile(f)
-		if err != nil {
-			h.Write([]byte{})
-		} else {
-			h.Write(content)
-		}
-		h.Write([]byte{0})
-	}
-
-	return fmt.Sprintf("%x", h.Sum(nil)[:8])
-}
-
-
-// canSkipRestore checks if --no-restore can be safely used
-// Returns true if obj/project.assets.json exists and is newer than
-// any .csproj file in the project or its transitive dependencies
-func canSkipRestore(projectPath string, relevantDirs []string) bool {
-	projectDir := filepath.Dir(projectPath)
-	assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
-
-	assetsInfo, err := os.Stat(assetsPath)
-	if err != nil {
-		return false
-	}
-
-	// Check if any .csproj in the project or its dependencies is newer than assets.json
-	for _, dir := range relevantDirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			if strings.HasSuffix(strings.ToLower(entry.Name()), ".csproj") {
-				info, err := entry.Info()
-				if err != nil {
-					continue
-				}
-				if info.ModTime().After(assetsInfo.ModTime()) {
-					return false
-				}
-			}
-		}
-	}
-
-	return true
-}
-
-// canSkipBuild checks if --no-build can be safely used
-// Returns true if output DLL exists and is newer than all source files
-// in the project AND all its transitive dependencies
-func canSkipBuild(projectPath string, relevantDirs []string) bool {
-	projectDir := filepath.Dir(projectPath)
-	projectName := strings.TrimSuffix(filepath.Base(projectPath), ".csproj")
-
-	// Find the output DLL - check common locations
-	var dllInfo os.FileInfo
-
-	// Check bin/Debug and bin/Release with various target frameworks
-	binDir := filepath.Join(projectDir, "bin")
-	filepath.WalkDir(binDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if strings.EqualFold(d.Name(), projectName+".dll") {
-			info, err := d.Info()
-			if err == nil {
-				if dllInfo == nil || info.ModTime().After(dllInfo.ModTime()) {
-					dllInfo = info
-				}
-			}
-		}
-		return nil
-	})
-
-	if dllInfo == nil {
-		return false
-	}
-
-	// Check if any source file in any relevant directory is newer than the DLL
-	// This includes the project's own directory AND all transitive dependencies
-	newerSourceFound := false
-	for _, dir := range relevantDirs {
-		if newerSourceFound {
-			break
-		}
-		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || newerSourceFound {
-				return filepath.SkipAll
-			}
-			if d.IsDir() {
-				name := d.Name()
-				if name == "bin" || name == "obj" || name == ".git" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext != ".cs" && ext != ".csproj" && ext != ".razor" && ext != ".props" && ext != ".targets" {
-				return nil
-			}
-
-			info, err := d.Info()
-			if err != nil {
-				return nil
-			}
-
-			if info.ModTime().After(dllInfo.ModTime()) {
-				newerSourceFound = true
-				return filepath.SkipAll
-			}
-			return nil
-		})
-	}
-
-	return !newerSourceFound
-}
-
 // getFailedTestFilter parses the cached output and/or TRX file to extract failed tests
 // and build a filter string for dotnet test.
 // Returns empty string if no specific tests can be identified (will rerun entire project).
@@ -456,8 +254,8 @@ func main() {
 
 	// Handle -list-heuristics flag
 	if *flagListHeuristics {
-		c, r, g, y, d := term.Color(colorCyan), term.Color(colorReset), term.Color(colorGreen), term.Color(colorYellow), term.Color(colorDim)
-		red := term.Color(colorRed)
+		c, r, g, y, d := term.Color(term.ColorCyan), term.Color(term.ColorReset), term.Color(term.ColorGreen), term.Color(term.ColorYellow), term.Color(term.ColorDim)
+		red := term.Color(term.ColorRed)
 		term.Printf("%sDefault heuristics%s (enabled with -heuristics=default):\n\n", c, r)
 		for _, h := range AvailableHeuristics {
 			term.Printf("  %s%-20s%s %s%s%s\n", g, h.Name, r, d, h.Description, r)
@@ -1243,15 +1041,15 @@ func formatTestStats(failed, passed, skipped, total string) string {
 	// Failed: dim if 0, red otherwise
 	var failedStr string
 	if failedN == 0 {
-		failedStr = fmt.Sprintf("%sFailed: %2s%s", colorDim, failed, colorReset)
+		failedStr = fmt.Sprintf("%sFailed: %2s%s", term.ColorDim, failed, term.ColorReset)
 	} else {
-		failedStr = fmt.Sprintf("%sFailed: %2s%s", colorRed, failed, colorReset)
+		failedStr = fmt.Sprintf("%sFailed: %2s%s", term.ColorRed, failed, term.ColorReset)
 	}
 
 	// Passed: green if passed+skipped=total (all accounted for)
 	var passedStr string
 	if passedN+skippedN == totalN {
-		passedStr = fmt.Sprintf("%sPassed: %3s%s", colorGreen, passed, colorReset)
+		passedStr = fmt.Sprintf("%sPassed: %3s%s", term.ColorGreen, passed, term.ColorReset)
 	} else {
 		passedStr = fmt.Sprintf("Passed: %3s", passed)
 	}
@@ -1259,9 +1057,9 @@ func formatTestStats(failed, passed, skipped, total string) string {
 	// Skipped: dim if 0, yellow otherwise
 	var skippedStr string
 	if skippedN == 0 {
-		skippedStr = fmt.Sprintf("%sSkipped: %2s%s", colorDim, skipped, colorReset)
+		skippedStr = fmt.Sprintf("%sSkipped: %2s%s", term.ColorDim, skipped, term.ColorReset)
 	} else {
-		skippedStr = fmt.Sprintf("%sSkipped: %2s%s", colorYellow, skipped, colorReset)
+		skippedStr = fmt.Sprintf("%sSkipped: %2s%s", term.ColorYellow, skipped, term.ColorReset)
 	}
 
 	totalStr := fmt.Sprintf("Total: %3s", total)
@@ -1319,7 +1117,7 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 					if term.IsPlain() {
 						term.Status("  FAIL %s\n\n", w.project.Name)
 					} else {
-						term.Status("  %s✗%s %s\n\n", colorRed, colorReset, w.project.Name)
+						term.Status("  %s✗%s %s\n\n", term.ColorRed, term.ColorReset, w.project.Name)
 					}
 					// Print buffered output
 					term.Write(w.buffer.Bytes())
@@ -1371,7 +1169,7 @@ func runSolutionCommand(command string, sln *Solution, projects []*Project, extr
 			if term.IsPlain() {
 				parts = append(parts, argsStr)
 			} else {
-				parts = append(parts, colorYellow+argsStr+colorReset)
+				parts = append(parts, term.ColorYellow+argsStr+term.ColorReset)
 			}
 		}
 
@@ -1427,15 +1225,15 @@ func runSolutionCommand(command string, sln *Solution, projects []*Project, extr
 	if !*flagQuiet {
 		if success {
 			if stats != "" {
-				term.Printf("  %s✓%s %s %s  %s\n", colorGreen, colorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond), stats)
+				term.Printf("  %s✓%s %s %s  %s\n", term.ColorGreen, term.ColorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond), stats)
 			} else {
-				term.Printf("  %s✓%s %s %s\n", colorGreen, colorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond))
+				term.Printf("  %s✓%s %s %s\n", term.ColorGreen, term.ColorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond))
 			}
 		} else {
 			if stats != "" {
-				term.Printf("  %s✗%s %s %s  %s\n", colorRed, colorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond), stats)
+				term.Printf("  %s✗%s %s %s  %s\n", term.ColorRed, term.ColorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond), stats)
 			} else {
-				term.Printf("  %s✗%s %s %s\n", colorRed, colorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond))
+				term.Printf("  %s✗%s %s %s\n", term.ColorRed, term.ColorReset, filepath.Base(sln.RelPath), duration.Round(time.Millisecond))
 			}
 			term.Printf("\n%s\n", outputStr)
 		}
@@ -1502,7 +1300,7 @@ func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remai
 			if term.IsPlain() {
 				parts = append(parts, argsStr)
 			} else {
-				parts = append(parts, colorYellow+argsStr+colorReset)
+				parts = append(parts, term.ColorYellow+argsStr+term.ColorReset)
 			}
 		}
 		term.Printf("%s...\n", strings.Join(parts, ", "))
@@ -1613,15 +1411,15 @@ func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remai
 		if !*flagQuiet {
 			if r.success {
 				if stats != "" {
-					term.Printf("  %s✓%s %s %s  %s\n", colorGreen, colorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond), stats)
+					term.Printf("  %s✓%s %s %s  %s\n", term.ColorGreen, term.ColorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond), stats)
 				} else {
-					term.Printf("  %s✓%s %s %s\n", colorGreen, colorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond))
+					term.Printf("  %s✓%s %s %s\n", term.ColorGreen, term.ColorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond))
 				}
 			} else {
 				if stats != "" {
-					term.Printf("  %s✗%s %s %s  %s\n", colorRed, colorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond), stats)
+					term.Printf("  %s✗%s %s %s  %s\n", term.ColorRed, term.ColorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond), stats)
 				} else {
-					term.Printf("  %s✗%s %s %s\n", colorRed, colorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond))
+					term.Printf("  %s✗%s %s %s\n", term.ColorRed, term.ColorReset, filepath.Base(r.sln.RelPath), r.duration.Round(time.Millisecond))
 				}
 				failedOutputs = append(failedOutputs, fmt.Sprintf("=== %s ===\n%s", filepath.Base(r.sln.RelPath), r.output))
 			}
@@ -1782,8 +1580,8 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				statusLine = fmt.Sprintf("Testing %d projects + building %d untested (%d workers)", testCount, buildOnlyCount, numWorkers)
 			} else {
 				statusLine = fmt.Sprintf("Testing %s%d projects%s + building %s%d untested%s (%d workers)",
-					colorGreen, testCount, colorReset,
-					colorYellow, buildOnlyCount, colorReset,
+					term.ColorGreen, testCount, term.ColorReset,
+					term.ColorYellow, buildOnlyCount, term.ColorReset,
 					numWorkers)
 			}
 		} else if buildOnlyCount > 0 {
@@ -1795,7 +1593,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			if term.IsPlain() {
 				statusLine += fmt.Sprintf(", %d cached", len(cachedProjects))
 			} else {
-				statusLine += fmt.Sprintf(", %s%d cached%s", colorCyan, len(cachedProjects), colorReset)
+				statusLine += fmt.Sprintf(", %s%d cached%s", term.ColorCyan, len(cachedProjects), term.ColorReset)
 			}
 		}
 
@@ -1806,7 +1604,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			if term.IsPlain() {
 				statusLine += ", " + argsStr
 			} else {
-				statusLine += ", " + colorYellow + argsStr + colorReset
+				statusLine += ", " + term.ColorYellow + argsStr + term.ColorReset
 			}
 		}
 
@@ -1916,7 +1714,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 							args = append(args, "--no-restore")
 							skippedRestore = true
 							term.Verbose("  [%s] skipping restore (up-to-date)", p.Name)
-						} else if term.verbose {
+						} else if term.IsVerbose() {
 							// Log why we couldn't skip restore
 							projectDir := filepath.Dir(projectPath)
 							assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
@@ -2212,7 +2010,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				if term.IsPlain() {
 					suffix = "  (no tests)"
 				} else {
-					suffix = fmt.Sprintf("  %s(no tests)%s", colorDim, colorReset)
+					suffix = fmt.Sprintf("  %s(no tests)%s", term.ColorDim, term.ColorReset)
 				}
 			} else {
 				// Test job - show test stats
@@ -2222,7 +2020,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					if term.IsPlain() {
 						suffix = fmt.Sprintf("  [%s]", strings.Join(r.testClasses, ", "))
 					} else {
-						suffix = fmt.Sprintf("  %s[%s]%s", colorCyan, strings.Join(r.testClasses, ", "), colorReset)
+						suffix = fmt.Sprintf("  %s[%s]%s", term.ColorCyan, strings.Join(r.testClasses, ", "), term.ColorReset)
 					}
 				}
 			}
@@ -2348,9 +2146,9 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		buildTotal := len(buildOnlyProjects)
 
 		success := len(failures) == 0
-		color := colorGreen
+		color := term.ColorGreen
 		if !success {
-			color = colorRed
+			color = term.ColorRed
 		}
 
 		if term.IsPlain() {
@@ -2364,13 +2162,13 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		} else {
 			if len(cachedProjects) > 0 {
 				term.Printf("\n%s%d/%d tests succeeded%s, %s%d/%d builds succeeded%s, %s%d cached%s (%s)\n",
-					color, testSucceeded, testTotal, colorReset,
-					color, buildSucceeded, buildTotal, colorReset,
-					colorCyan, len(cachedProjects), colorReset, totalDuration)
+					color, testSucceeded, testTotal, term.ColorReset,
+					color, buildSucceeded, buildTotal, term.ColorReset,
+					term.ColorCyan, len(cachedProjects), term.ColorReset, totalDuration)
 			} else {
 				term.Printf("\n%s%d/%d tests succeeded%s, %s%d/%d builds succeeded%s (%s)\n",
-					color, testSucceeded, testTotal, colorReset,
-					color, buildSucceeded, buildTotal, colorReset, totalDuration)
+					color, testSucceeded, testTotal, term.ColorReset,
+					color, buildSucceeded, buildTotal, term.ColorReset, totalDuration)
 			}
 		}
 	} else {
@@ -2489,7 +2287,7 @@ func formatExtraArgs(args []string) string {
 	if term.IsPlain() {
 		return " (" + strings.Join(display, " ") + ")"
 	}
-	return " " + colorYellow + "(" + strings.Join(display, " ") + ")" + colorReset
+	return " " + term.ColorYellow + "(" + strings.Join(display, " ") + ")" + term.ColorReset
 }
 
 // filterDisplayArgs filters extra args for display, removing internal/verbose flags
@@ -2890,7 +2688,7 @@ func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, max
 				testCmd.Stdout = &stdout
 				testCmd.Stderr = &stderr
 				runErr := testCmd.Run()
-				if term.verbose && runErr != nil {
+				if term.IsVerbose() && runErr != nil {
 					term.Verbose("    [%s] test failed: %v", testName, runErr)
 				}
 

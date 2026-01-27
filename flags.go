@@ -4,6 +4,8 @@ import (
 	"flag"
 	"os"
 	"strings"
+
+	"github.com/runar-rkmedia/donotnet/term"
 )
 
 // levenshtein computes the Levenshtein distance between two strings
@@ -148,7 +150,7 @@ func checkForUnknownFlags() bool {
 		term.Errorf("unknown flag: -%s", name)
 
 		if suggestion, found := suggestFlag(name, defined); found {
-			g, r, d := term.Color(colorGreen), term.Color(colorReset), term.Color(colorDim)
+			g, r, d := term.Color(term.ColorGreen), term.Color(term.ColorReset), term.Color(term.ColorDim)
 			term.Printf("Did you mean: %s-%s%s?\n", g, suggestion, r)
 			if f := flag.Lookup(suggestion); f != nil && f.Usage != "" {
 				term.Printf("  %s%s%s\n", d, f.Usage, r)

@@ -1,4 +1,5 @@
-package main
+// Package term provides colored terminal output helpers.
+package term
 
 import (
 	"fmt"
@@ -11,25 +12,25 @@ import (
 
 // ANSI color codes
 const (
-	colorReset  = "\033[0m"
-	colorRed    = "\033[31m"
-	colorGreen  = "\033[32m"
-	colorYellow = "\033[33m"
-	colorCyan   = "\033[36m"
-	colorDim    = "\033[2m"
+	ColorReset  = "\033[0m"
+	ColorRed    = "\033[31m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorCyan   = "\033[36m"
+	ColorDim    = "\033[2m"
 )
 
 // Terminal provides colored output helpers
 type Terminal struct {
 	w        io.Writer
-	verbose  bool
+	Verbose  bool // exported for checking verbose state
 	plain    bool // when true, disable all ANSI codes
 	progress bool // when true, show progress indicators
 	isTTY    bool // true if stderr is a terminal
 }
 
-// NewTerminal creates a Terminal that writes to stderr
-func NewTerminal() *Terminal {
+// New creates a Terminal that writes to stderr
+func New() *Terminal {
 	isTTY := goterm.IsTerminal(int(os.Stderr.Fd()))
 	return &Terminal{
 		w:        os.Stderr,
@@ -66,7 +67,7 @@ func (t *Terminal) ShowProgress() bool {
 
 // SetVerbose enables or disables verbose output
 func (t *Terminal) SetVerbose(v bool) {
-	t.verbose = v
+	t.Verbose = v
 }
 
 // Info prints an informational message in cyan (with newline)
@@ -74,7 +75,7 @@ func (t *Terminal) Info(format string, args ...any) {
 	if t.plain {
 		fmt.Fprintf(t.w, format+"\n", args...)
 	} else {
-		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{colorCyan}, append(args, colorReset)...)...)
+		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{ColorCyan}, append(args, ColorReset)...)...)
 	}
 }
 
@@ -83,7 +84,7 @@ func (t *Terminal) Dim(format string, args ...any) {
 	if t.plain {
 		fmt.Fprintf(t.w, format+"\n", args...)
 	} else {
-		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{colorDim}, append(args, colorReset)...)...)
+		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{ColorDim}, append(args, ColorReset)...)...)
 	}
 }
 
@@ -92,7 +93,7 @@ func (t *Terminal) Success(format string, args ...any) {
 	if t.plain {
 		fmt.Fprintf(t.w, format+"\n", args...)
 	} else {
-		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{colorGreen}, append(args, colorReset)...)...)
+		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{ColorGreen}, append(args, ColorReset)...)...)
 	}
 }
 
@@ -101,7 +102,7 @@ func (t *Terminal) Error(format string, args ...any) {
 	if t.plain {
 		fmt.Fprintf(t.w, format+"\n", args...)
 	} else {
-		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{colorRed}, append(args, colorReset)...)...)
+		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{ColorRed}, append(args, ColorReset)...)...)
 	}
 }
 
@@ -110,7 +111,7 @@ func (t *Terminal) Errorf(format string, args ...any) {
 	if t.plain {
 		fmt.Fprintf(t.w, "error: "+format+"\n", args...)
 	} else {
-		fmt.Fprintf(t.w, "%serror: "+format+"%s\n", append([]any{colorRed}, append(args, colorReset)...)...)
+		fmt.Fprintf(t.w, "%serror: "+format+"%s\n", append([]any{ColorRed}, append(args, ColorReset)...)...)
 	}
 }
 
@@ -119,7 +120,7 @@ func (t *Terminal) Warn(format string, args ...any) {
 	if t.plain {
 		fmt.Fprintf(t.w, format+"\n", args...)
 	} else {
-		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{colorYellow}, append(args, colorReset)...)...)
+		fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{ColorYellow}, append(args, ColorReset)...)...)
 	}
 }
 
@@ -128,17 +129,17 @@ func (t *Terminal) Warnf(format string, args ...any) {
 	if t.plain {
 		fmt.Fprintf(t.w, "warning: "+format+"\n", args...)
 	} else {
-		fmt.Fprintf(t.w, "%swarning: "+format+"%s\n", append([]any{colorYellow}, append(args, colorReset)...)...)
+		fmt.Fprintf(t.w, "%swarning: "+format+"%s\n", append([]any{ColorYellow}, append(args, ColorReset)...)...)
 	}
 }
 
-// Verbose prints a dim message only if verbose mode is enabled (with newline)
-func (t *Terminal) Verbose(format string, args ...any) {
-	if t.verbose {
+// VerboseLog prints a dim message only if verbose mode is enabled (with newline)
+func (t *Terminal) VerboseLog(format string, args ...any) {
+	if t.Verbose {
 		if t.plain {
 			fmt.Fprintf(t.w, format+"\n", args...)
 		} else {
-			fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{colorDim}, append(args, colorReset)...)...)
+			fmt.Fprintf(t.w, "%s"+format+"%s\n", append([]any{ColorDim}, append(args, ColorReset)...)...)
 		}
 	}
 }
@@ -202,15 +203,15 @@ func (t *Terminal) ResultLine(success bool, skipIndicator, paddedName, durationS
 	} else {
 		if success {
 			if stats != "" {
-				fmt.Fprintf(t.w, "  %s✓%s%s %s %s  %s%s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr, stats, filterInfo)
+				fmt.Fprintf(t.w, "  %s✓%s%s %s %s  %s%s\n", ColorGreen, ColorReset, skipIndicator, paddedName, durationStr, stats, filterInfo)
 			} else {
-				fmt.Fprintf(t.w, "  %s✓%s%s %s %s%s\n", colorGreen, colorReset, skipIndicator, paddedName, durationStr, filterInfo)
+				fmt.Fprintf(t.w, "  %s✓%s%s %s %s%s\n", ColorGreen, ColorReset, skipIndicator, paddedName, durationStr, filterInfo)
 			}
 		} else {
 			if stats != "" {
-				fmt.Fprintf(t.w, "  %s✗%s%s %s %s  %s\n", colorRed, colorReset, skipIndicator, paddedName, durationStr, stats)
+				fmt.Fprintf(t.w, "  %s✗%s%s %s %s  %s\n", ColorRed, ColorReset, skipIndicator, paddedName, durationStr, stats)
 			} else {
-				fmt.Fprintf(t.w, "  %s✗%s%s %s %s\n", colorRed, colorReset, skipIndicator, paddedName, durationStr)
+				fmt.Fprintf(t.w, "  %s✗%s%s %s %s\n", ColorRed, ColorReset, skipIndicator, paddedName, durationStr)
 			}
 		}
 	}
@@ -221,7 +222,7 @@ func (t *Terminal) CachedLine(name string) {
 	if t.plain {
 		fmt.Fprintf(t.w, "  CACHED %s\n", name)
 	} else {
-		fmt.Fprintf(t.w, "  %s○ %s (cached)%s\n", colorDim, name, colorReset)
+		fmt.Fprintf(t.w, "  %s○ %s (cached)%s\n", ColorDim, name, ColorReset)
 	}
 }
 
@@ -234,14 +235,14 @@ func (t *Terminal) Summary(succeeded, total, cached int, duration time.Duration,
 			fmt.Fprintf(t.w, "\n%d/%d succeeded (%s)\n", succeeded, total, duration)
 		}
 	} else {
-		color := colorGreen
+		color := ColorGreen
 		if !success {
-			color = colorRed
+			color = ColorRed
 		}
 		if cached > 0 {
-			fmt.Fprintf(t.w, "\n%s%d/%d succeeded%s, %s%d cached%s (%s)\n", color, succeeded, total, colorReset, colorCyan, cached, colorReset, duration)
+			fmt.Fprintf(t.w, "\n%s%d/%d succeeded%s, %s%d cached%s (%s)\n", color, succeeded, total, ColorReset, ColorCyan, cached, ColorReset, duration)
 		} else {
-			fmt.Fprintf(t.w, "\n%s%d/%d succeeded%s (%s)\n", color, succeeded, total, colorReset, duration)
+			fmt.Fprintf(t.w, "\n%s%d/%d succeeded%s (%s)\n", color, succeeded, total, ColorReset, duration)
 		}
 	}
 }
@@ -258,12 +259,46 @@ func (t *Terminal) SkipIndicator(skippedBuild, skippedRestore bool) string {
 		return ""
 	}
 	if skippedBuild {
-		return fmt.Sprintf(" %s⚡%s", colorYellow, colorReset)
+		return fmt.Sprintf(" %s⚡%s", ColorYellow, ColorReset)
 	} else if skippedRestore {
-		return fmt.Sprintf(" %s↻%s ", colorCyan, colorReset) // extra space to match ⚡ width
+		return fmt.Sprintf(" %s↻%s ", ColorCyan, ColorReset) // extra space to match ⚡ width
 	}
 	return "   " // three spaces to align with " ⚡" (space + wide emoji)
 }
 
-// term is the global terminal instance
-var term = NewTerminal()
+// Default is the default terminal instance used by package-level functions
+var Default = New()
+
+// Package-level functions that delegate to Default
+
+func SetPlain(p bool)                  { Default.SetPlain(p) }
+func SetProgress(p bool)               { Default.SetProgress(p) }
+func SetVerbose(v bool)                { Default.SetVerbose(v) }
+func IsVerbose() bool                  { return Default.Verbose }
+func IsTTY() bool                      { return Default.IsTTY() }
+func IsPlain() bool                    { return Default.IsPlain() }
+func ShowProgress() bool               { return Default.ShowProgress() }
+func Info(format string, args ...any)  { Default.Info(format, args...) }
+func Dim(format string, args ...any)   { Default.Dim(format, args...) }
+func Success(format string, args ...any) { Default.Success(format, args...) }
+func Error(format string, args ...any) { Default.Error(format, args...) }
+func Errorf(format string, args ...any) { Default.Errorf(format, args...) }
+func Warn(format string, args ...any)  { Default.Warn(format, args...) }
+func Warnf(format string, args ...any) { Default.Warnf(format, args...) }
+func Verbose(format string, args ...any) { Default.VerboseLog(format, args...) }
+func Printf(format string, args ...any) { Default.Printf(format, args...) }
+func Color(code string) string         { return Default.Color(code) }
+func Write(p []byte) (int, error)      { return Default.Write(p) }
+func Println(args ...any)              { Default.Println(args...) }
+func ClearLine()                       { Default.ClearLine() }
+func Status(format string, args ...any) { Default.Status(format, args...) }
+func ResultLine(success bool, skipIndicator, paddedName, durationStr, stats, filterInfo string) {
+	Default.ResultLine(success, skipIndicator, paddedName, durationStr, stats, filterInfo)
+}
+func CachedLine(name string) { Default.CachedLine(name) }
+func Summary(succeeded, total, cached int, duration time.Duration, success bool) {
+	Default.Summary(succeeded, total, cached, duration, success)
+}
+func SkipIndicator(skippedBuild, skippedRestore bool) string {
+	return Default.SkipIndicator(skippedBuild, skippedRestore)
+}
