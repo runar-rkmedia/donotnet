@@ -24,6 +24,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/runar-rkmedia/donotnet/coverage"
+	"github.com/runar-rkmedia/donotnet/devplan"
 	"github.com/runar-rkmedia/donotnet/testresults"
 	ignore "github.com/sabhiram/go-gitignore"
 	bolt "go.etcd.io/bbolt"
@@ -1387,6 +1388,23 @@ func main() {
 			return
 		}
 
+		// Handle --dev-plan: show scheduling plan for all relevant projects and exit
+		if *flagDevPlan {
+			// Use all relevant projects (affected + cached) to show complete plan
+			allRelevant := append(targetProjects, cachedProjects...)
+			planProjects := make([]*devplan.Project, len(allRelevant))
+			for i, p := range allRelevant {
+				planProjects[i] = &devplan.Project{Path: p.Path, Name: p.Name}
+			}
+			plan := devplan.ComputePlan(planProjects, forwardGraph)
+			colors := devplan.DefaultColors()
+			if term.IsPlain() {
+				colors = devplan.PlainColors()
+			}
+			plan.Print(os.Stdout, colors)
+			return
+		}
+
 		if len(targetProjects) == 0 {
 			if !*flagQuiet {
 				term.Dim("No affected projects to %s (%d cached)%s", command, len(cachedProjects), formatExtraArgs(dotnetArgs))
@@ -2519,12 +2537,6 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		numWorkers = len(projects)
 	}
 
-	// Handle --dev-plan: show scheduling plan and exit
-	if *flagDevPlan {
-		printSchedulingPlan(projects, forwardGraph)
-		return true
-	}
-
 	if !*flagQuiet {
 		// Build status line
 		var parts []string
@@ -3214,90 +3226,6 @@ var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func stripAnsi(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
-}
-
-// printSchedulingPlan shows how jobs would be scheduled based on dependencies
-func printSchedulingPlan(projects []*Project, forwardGraph map[string][]string) {
-	// Build target set
-	targetSet := make(map[string]bool)
-	for _, p := range projects {
-		targetSet[p.Path] = true
-	}
-
-	// For each project, find deps within target set
-	pendingDeps := make(map[string][]string)
-	for _, p := range projects {
-		var deps []string
-		for _, depPath := range forwardGraph[p.Path] {
-			if targetSet[depPath] {
-				deps = append(deps, depPath)
-			}
-		}
-		pendingDeps[p.Path] = deps
-	}
-
-	// Simulate scheduling waves
-	completed := make(map[string]bool)
-	wave := 1
-
-	// Color helpers
-	bold := "\033[1m"
-	if term.IsPlain() {
-		bold = ""
-	}
-
-	fmt.Printf("%s%sJob Scheduling Plan%s (%d projects)\n", bold, colorCyan, colorReset, len(projects))
-	fmt.Println(strings.Repeat("─", 50))
-	fmt.Printf("%sWaves show dependency order. In practice, projects start\nas soon as their dependencies complete, not in strict waves.%s\n", colorDim, colorReset)
-
-	for len(completed) < len(projects) {
-		// Find ready projects (all deps completed)
-		var ready []*Project
-		for _, p := range projects {
-			if completed[p.Path] {
-				continue
-			}
-			isReady := true
-			for _, dep := range pendingDeps[p.Path] {
-				if !completed[dep] {
-					isReady = false
-					break
-				}
-			}
-			if isReady {
-				ready = append(ready, p)
-			}
-		}
-
-		if len(ready) == 0 {
-			fmt.Printf("\n%sERROR:%s Circular dependency detected!\n", colorRed, colorReset)
-			for _, p := range projects {
-				if !completed[p.Path] {
-					fmt.Printf("  %sStuck:%s %s (waiting on: %v)\n", colorRed, colorReset, p.Name, pendingDeps[p.Path])
-				}
-			}
-			break
-		}
-
-		fmt.Printf("\n%s%sWave %d%s %s(%d projects, can run in parallel)%s\n", bold, colorGreen, wave, colorReset, colorDim, len(ready), colorReset)
-		for _, p := range ready {
-			deps := pendingDeps[p.Path]
-			if len(deps) == 0 {
-				fmt.Printf("  %s•%s %s\n", colorGreen, colorReset, p.Name)
-			} else {
-				// Show which deps this was waiting on
-				var depNames []string
-				for _, dep := range deps {
-					depNames = append(depNames, filepath.Base(filepath.Dir(dep)))
-				}
-				fmt.Printf("  %s•%s %s %s(after: %s)%s\n", colorYellow, colorReset, p.Name, colorDim, strings.Join(depNames, ", "), colorReset)
-			}
-			completed[p.Path] = true
-		}
-		wave++
-	}
-
-	fmt.Println()
 }
 
 // ============================================================================
