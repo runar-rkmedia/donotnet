@@ -247,6 +247,7 @@ func (t *Terminal) Summary(succeeded, total, cached int, duration time.Duration,
 }
 
 // SkipIndicator returns a formatted skip indicator string
+// Note: ⚡ renders wider than ↻ in most terminal fonts, so we add a space after ↻ to align
 func (t *Terminal) SkipIndicator(skippedBuild, skippedRestore bool) string {
 	if t.plain {
 		if skippedBuild {
@@ -259,9 +260,9 @@ func (t *Terminal) SkipIndicator(skippedBuild, skippedRestore bool) string {
 	if skippedBuild {
 		return fmt.Sprintf(" %s⚡%s", colorYellow, colorReset)
 	} else if skippedRestore {
-		return fmt.Sprintf(" %s↻%s", colorCyan, colorReset)
+		return fmt.Sprintf(" %s↻%s ", colorCyan, colorReset) // extra space to match ⚡ width
 	}
-	return "  " // two spaces to align with " ↻" (space + emoji)
+	return "   " // three spaces to align with " ⚡" (space + wide emoji)
 }
 
 // term is the global terminal instance

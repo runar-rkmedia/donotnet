@@ -1330,13 +1330,34 @@ func main() {
 		return
 	}
 
+	// Find untested projects (non-test projects not referenced by any test project)
+	// These will be built instead of tested to at least verify they compile
+	var untestedProjects []*Project
+	var untestedAffected []*Project
+	if command == "test" {
+		untestedProjects = findUntestedProjects(projects, forwardGraph)
+		// Filter to only affected untested projects
+		for _, p := range untestedProjects {
+			if affected[p.Path] {
+				untestedAffected = append(untestedAffected, p)
+			}
+		}
+		if len(untestedAffected) > 0 {
+			var names []string
+			for _, p := range untestedAffected {
+				names = append(names, p.Name)
+			}
+			term.Warnf("%d project(s) have no tests, will build instead: %s", len(untestedAffected), strings.Join(names, ", "))
+		}
+	}
+
 	// Handle commands
 	if command != "" {
 		// Watch mode
 		if *flagWatch {
 			// Run initial test/build first
 			if len(targetProjects) > 0 {
-				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, nil, solutions)
+				runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, nil, solutions, nil)
 			} else {
 				term.Dim("No affected projects to %s (%d cached)%s", command, len(cachedProjects), formatExtraArgs(dotnetArgs))
 			}
@@ -1437,9 +1458,24 @@ func main() {
 			return
 		}
 
-		success := runDotnetCommand(command, targetProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, failedTestFilters, solutions)
-		if !success {
-			os.Exit(1)
+		// Combine test projects and build-only projects into a single run
+		var allProjects []*Project
+		var buildOnlyMap map[string]bool
+
+		if len(untestedAffected) > 0 {
+			buildOnlyMap = make(map[string]bool)
+			for _, p := range untestedAffected {
+				buildOnlyMap[p.Path] = true
+			}
+			allProjects = append(allProjects, untestedAffected...)
+		}
+		allProjects = append(allProjects, targetProjects...)
+
+		if len(allProjects) > 0 {
+			success := runDotnetCommand(command, allProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, failedTestFilters, solutions, buildOnlyMap)
+			if !success {
+				os.Exit(1)
+			}
 		}
 		return
 	}
@@ -1838,6 +1874,34 @@ func buildForwardDependencyGraph(projects []*Project) map[string][]string {
 	return graph
 }
 
+// findUntestedProjects returns non-test projects that are not referenced by any test project.
+// These projects have no test coverage and should be built (not tested) to at least verify they compile.
+func findUntestedProjects(projects []*Project, forwardGraph map[string][]string) []*Project {
+	// Build set of all projects that are referenced by test projects
+	testedProjects := make(map[string]bool)
+	for _, p := range projects {
+		if !p.IsTest {
+			continue
+		}
+		// Add all projects this test project depends on (directly and transitively)
+		for _, dep := range getTransitiveDependencies(p.Path, forwardGraph) {
+			testedProjects[dep] = true
+		}
+	}
+
+	// Find non-test projects that are not in the tested set
+	var untested []*Project
+	for _, p := range projects {
+		if p.IsTest {
+			continue
+		}
+		if !testedProjects[p.Path] {
+			untested = append(untested, p)
+		}
+	}
+	return untested
+}
+
 // getTransitiveDependencies returns all transitive dependencies of a project
 func getTransitiveDependencies(projectPath string, forwardGraph map[string][]string) []string {
 	visited := make(map[string]bool)
@@ -1991,6 +2055,8 @@ type runResult struct {
 	skippedRestore bool
 	filteredTests  bool     // true if only specific tests were run
 	testClasses    []string // test classes that were run (if filtered)
+	buildOnly      bool     // true if this was a build-only job (no tests)
+	viaSolution    bool     // true if this was run as part of a solution build
 }
 
 type statusUpdate struct {
@@ -2262,7 +2328,7 @@ func runSolutionCommand(command string, sln *Solution, projects []*Project, extr
 
 // runSolutionGroups runs multiple solution builds in parallel, then builds remaining projects.
 // Used when some projects can be built via solutions and others must be built individually.
-func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remaining []*Project, extraArgs []string, root string, db *bolt.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter, failedTestFilters map[string]string, solutions []*Solution) bool {
+func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remaining []*Project, extraArgs []string, root string, db *bolt.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter, failedTestFilters map[string]string, solutions []*Solution, buildOnlyProjects map[string]bool) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -2458,10 +2524,10 @@ func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remai
 	// Run remaining individual projects if any
 	if len(remaining) > 0 {
 		if !*flagQuiet {
-			term.Printf("\nBuilding %d individual projects...\n", len(remaining))
+			term.Printf("\nRunning %d individual projects...\n", len(remaining))
 		}
 		// Use the standard project runner for remaining projects (pass nil for solutions to avoid re-checking)
-		projSuccess := runDotnetCommand(command, remaining, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, nil, reportsDir, testFilter, failedTestFilters, nil)
+		projSuccess := runDotnetCommand(command, remaining, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, nil, reportsDir, testFilter, failedTestFilters, nil, buildOnlyProjects)
 		if !projSuccess {
 			return false
 		}
@@ -2484,12 +2550,30 @@ func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remai
 	return slnFailed == 0
 }
 
-func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, db *bolt.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter, failedTestFilters map[string]string, solutions []*Solution) bool {
+func runDotnetCommand(command string, projects []*Project, extraArgs []string, root string, db *bolt.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, testFilter *TestFilter, failedTestFilters map[string]string, solutions []*Solution, buildOnlyProjects map[string]bool) bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Build args string for caching
 	argsForCache := strings.Join(append([]string{command}, extraArgs...), " ")
+
+	// Pre-compute build-specific hash and cache string for build-only projects
+	var buildArgsHash, buildArgsForCache string
+	if len(buildOnlyProjects) > 0 {
+		buildArgsHash = hashArgs(append([]string{"build"}, extraArgs...))
+		buildArgsForCache = strings.Join(append([]string{"build"}, extraArgs...), " ")
+	}
+
+	// Separate build-only projects - they should always run individually, not via solutions
+	var testProjects []*Project
+	var buildOnlyList []*Project
+	for _, p := range projects {
+		if buildOnlyProjects != nil && buildOnlyProjects[p.Path] {
+			buildOnlyList = append(buildOnlyList, p)
+		} else {
+			testProjects = append(testProjects, p)
+		}
+	}
 
 	// Check if we can build/test at solution level instead of individual projects
 	// This avoids parallel build conflicts when projects share dependencies
@@ -2497,10 +2581,14 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	// Default behavior: use solution only if ALL projects in that solution need building
 	// With --solution: use solution if 2+ projects in that solution need building
 	// With --no-solution: never use solutions
-	if !*flagNoSolution && len(projects) > 1 {
-		// First try: single solution containing all projects
-		if sln := findCommonSolution(projects, solutions, root); sln != nil {
-			return runSolutionCommand(command, sln, projects, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, failedTestFilters)
+	// Note: only test projects use solution optimization; build-only projects run individually
+	if !*flagNoSolution && len(testProjects) > 1 {
+		// First try: single solution containing all test projects
+		if sln := findCommonSolution(testProjects, solutions, root); sln != nil {
+			// If we have build-only projects, can't use single solution path - need to run them too
+			if len(buildOnlyList) == 0 {
+				return runSolutionCommand(command, sln, testProjects, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, failedTestFilters)
+			}
 		}
 
 		// Second try: find solutions where ALL their projects need building (default)
@@ -2508,14 +2596,17 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		var slnGroups map[*Solution][]*Project
 		var remaining []*Project
 		if *flagSolution {
-			slnGroups, remaining = groupProjectsBySolution(projects, solutions, root)
+			slnGroups, remaining = groupProjectsBySolution(testProjects, solutions, root)
 		} else {
-			slnGroups, remaining = findCompleteSolutionMatches(projects, solutions, root)
+			slnGroups, remaining = findCompleteSolutionMatches(testProjects, solutions, root)
 		}
 
+		// Add build-only projects to the remaining list
+		remaining = append(remaining, buildOnlyList...)
+
 		if len(slnGroups) > 0 {
-			// Run solution builds in parallel, then remaining projects
-			return runSolutionGroups(command, slnGroups, remaining, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, testFilter, failedTestFilters, solutions)
+			// Run solution builds in parallel, then remaining projects (including build-only)
+			return runSolutionGroups(command, slnGroups, remaining, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, testFilter, failedTestFilters, solutions, buildOnlyProjects)
 		}
 	}
 
@@ -2538,26 +2629,53 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	}
 
 	if !*flagQuiet {
-		// Build status line
-		var parts []string
-		parts = append(parts, fmt.Sprintf("Running %s on %d projects", command, len(projects)))
-		if len(cachedProjects) > 0 {
-			parts = append(parts, fmt.Sprintf("%d cached", len(cachedProjects)))
+		// Count test vs build-only projects
+		testCount := 0
+		buildOnlyCount := 0
+		for _, p := range projects {
+			if buildOnlyProjects != nil && buildOnlyProjects[p.Path] {
+				buildOnlyCount++
+			} else {
+				testCount++
+			}
 		}
-		parts = append(parts, fmt.Sprintf("%d workers", numWorkers))
+
+		// Build status line
+		var statusLine string
+		if buildOnlyCount > 0 && testCount > 0 {
+			if term.IsPlain() {
+				statusLine = fmt.Sprintf("Testing %d projects + building %d untested (%d workers)", testCount, buildOnlyCount, numWorkers)
+			} else {
+				statusLine = fmt.Sprintf("Testing %s%d projects%s + building %s%d untested%s (%d workers)",
+					colorGreen, testCount, colorReset,
+					colorYellow, buildOnlyCount, colorReset,
+					numWorkers)
+			}
+		} else if buildOnlyCount > 0 {
+			statusLine = fmt.Sprintf("Building %d projects (%d workers)", buildOnlyCount, numWorkers)
+		} else {
+			statusLine = fmt.Sprintf("Running %s on %d projects (%d workers)", command, len(projects), numWorkers)
+		}
+		if len(cachedProjects) > 0 {
+			if term.IsPlain() {
+				statusLine += fmt.Sprintf(", %d cached", len(cachedProjects))
+			} else {
+				statusLine += fmt.Sprintf(", %s%d cached%s", colorCyan, len(cachedProjects), colorReset)
+			}
+		}
 
 		// Add condensed extra args if any (excluding internal flags), colored
 		displayArgs := filterDisplayArgs(extraArgs)
 		if len(displayArgs) > 0 {
 			argsStr := strings.Join(displayArgs, " ")
 			if term.IsPlain() {
-				parts = append(parts, argsStr)
+				statusLine += ", " + argsStr
 			} else {
-				parts = append(parts, colorYellow+argsStr+colorReset)
+				statusLine += ", " + colorYellow + argsStr + colorReset
 			}
 		}
 
-		term.Printf("%s...\n", strings.Join(parts, ", "))
+		term.Printf("%s...\n", statusLine)
 
 		// Print per-project filters if --failed mode has filters
 		if len(failedTestFilters) > 0 {
@@ -2619,7 +2737,15 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 				projectStart := time.Now()
 				projectPath := filepath.Join(root, p.Path)
-				args := []string{command, projectPath, "--property:WarningLevel=0"}
+
+				// Check if this is a build-only project (no tests)
+				isBuildOnly := buildOnlyProjects != nil && buildOnlyProjects[p.Path]
+				projectCommand := command
+				if isBuildOnly {
+					projectCommand = "build"
+				}
+
+				args := []string{projectCommand, projectPath, "--property:WarningLevel=0"}
 
 				// Auto-detect if we can skip restore/build (unless user already specified or disabled)
 				hasNoRestore := false
@@ -2640,7 +2766,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					relevantDirs := getProjectRelevantDirs(p, forwardGraph)
 
 					// --no-build is only valid for test, not build
-					if command == "test" && !hasNoBuild {
+					if projectCommand == "test" && !hasNoBuild {
 						if canSkipBuild(projectPath, relevantDirs) {
 							args = append(args, "--no-build")
 							hasNoBuild = true
@@ -2676,7 +2802,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				// Check if we can filter to specific tests (only in test command with testFilter)
 				var filteredTests bool
 				var testClasses []string
-				if command == "test" && testFilter != nil {
+				if projectCommand == "test" && testFilter != nil {
 					filterResult := testFilter.GetFilter(p.Path, root)
 					if filterResult.CanFilter {
 						// Check if user already has a --filter arg - if so, combine with AND
@@ -2722,7 +2848,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				}
 
 				// Apply failed test filters (from --failed flag)
-				if command == "test" && failedTestFilters != nil {
+				if projectCommand == "test" && failedTestFilters != nil {
 					if filter, ok := failedTestFilters[p.Path]; ok && filter != "" {
 						args = append(args, "--filter", filter)
 						filteredTests = true
@@ -2732,7 +2858,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 				// Add TRX logger if reports enabled
 				var trxPath string
-				if !*flagNoReports && command == "test" {
+				if !*flagNoReports && projectCommand == "test" {
 					os.MkdirAll(reportsDir, 0755)
 					trxPath = filepath.Join(reportsDir, p.Name+".trx")
 					args = append(args, "--logger", "trx;LogFileName="+trxPath)
@@ -2809,7 +2935,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				select {
 				case <-ctx.Done():
 					return
-				case results <- runResult{project: p, success: err == nil, output: outputStr, duration: duration, skippedBuild: skippedBuild, skippedRestore: skippedRestore, filteredTests: filteredTests, testClasses: testClasses}:
+				case results <- runResult{project: p, success: err == nil, output: outputStr, duration: duration, skippedBuild: skippedBuild, skippedRestore: skippedRestore, filteredTests: filteredTests, testClasses: testClasses, buildOnly: isBuildOnly}:
 				}
 			}
 		}()
@@ -2884,6 +3010,8 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 	// Collect results
 	succeeded := 0
+	testSucceeded := 0
+	buildSucceeded := 0
 	completed := 0
 	var failures []runResult
 	var allResults []runResult // For --print-output mode
@@ -2936,26 +3064,42 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				continue
 			}
 			clearStatus()
-			stats := extractTestStats(r.output)
 			skipIndicator := term.SkipIndicator(r.skippedBuild, r.skippedRestore)
 
 			// Pad project name and duration for alignment
 			paddedName := fmt.Sprintf("%-*s", maxNameLen, r.project.Name)
 			durationStr := fmt.Sprintf("%7s", r.duration.Round(time.Millisecond))
 
-			// Add filter info if tests were filtered
-			filterInfo := ""
-			if r.filteredTests && len(r.testClasses) > 0 {
+			// Build stats and suffix based on job type
+			var stats, suffix string
+			if r.buildOnly {
+				// Build-only job - show build indicator instead of test stats
 				if term.IsPlain() {
-					filterInfo = fmt.Sprintf("  [%s]", strings.Join(r.testClasses, ", "))
+					suffix = "  (no tests)"
 				} else {
-					filterInfo = fmt.Sprintf("  %s[%s]%s", colorCyan, strings.Join(r.testClasses, ", "), colorReset)
+					suffix = fmt.Sprintf("  %s(no tests)%s", colorDim, colorReset)
+				}
+			} else {
+				// Test job - show test stats
+				stats = extractTestStats(r.output)
+				// Add filter info if tests were filtered
+				if r.filteredTests && len(r.testClasses) > 0 {
+					if term.IsPlain() {
+						suffix = fmt.Sprintf("  [%s]", strings.Join(r.testClasses, ", "))
+					} else {
+						suffix = fmt.Sprintf("  %s[%s]%s", colorCyan, strings.Join(r.testClasses, ", "), colorReset)
+					}
 				}
 			}
 
 			if r.success {
 				succeeded++
-				term.ResultLine(true, skipIndicator, paddedName, durationStr, stats, filterInfo)
+				if r.buildOnly {
+					buildSucceeded++
+				} else {
+					testSucceeded++
+				}
+				term.ResultLine(true, skipIndicator, paddedName, durationStr, stats, suffix)
 
 				// Touch project.assets.json to ensure mtime is updated for future skip detection
 				// (dotnet doesn't always rewrite it if packages haven't changed)
@@ -2966,27 +3110,43 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 				// Mark successful immediately (including dependencies)
 				// Store output only for the project that ran
+				// Use build-specific hash for build-only projects
+				cacheArgsHash := argsHash
+				cacheArgsForCache := argsForCache
+				if r.buildOnly {
+					cacheArgsHash = buildArgsHash
+					cacheArgsForCache = buildArgsForCache
+				}
+
 				relevantDirs := getProjectRelevantDirs(r.project, forwardGraph)
 				contentHash := computeContentHash(root, relevantDirs)
-				key := makeCacheKey(contentHash, argsHash, r.project.Path)
-				markCacheResult(db, key, now, true, []byte(r.output), argsForCache)
+				key := makeCacheKey(contentHash, cacheArgsHash, r.project.Path)
+				markCacheResult(db, key, now, true, []byte(r.output), cacheArgsForCache)
 
 				// Also mark transitive dependencies (without output)
 				for _, depPath := range getTransitiveDependencies(r.project.Path, forwardGraph) {
 					if dep, ok := projectsByPath[depPath]; ok {
 						depRelevantDirs := getProjectRelevantDirs(dep, forwardGraph)
 						depContentHash := computeContentHash(root, depRelevantDirs)
-						depKey := makeCacheKey(depContentHash, argsHash, dep.Path)
-						markCacheResult(db, depKey, now, true, nil, argsForCache)
+						depKey := makeCacheKey(depContentHash, cacheArgsHash, dep.Path)
+						markCacheResult(db, depKey, now, true, nil, cacheArgsForCache)
 					}
 				}
 			} else {
 				failures = append(failures, r)
 				// Mark failure in cache for --failed support
+				// Use build-specific hash for build-only projects
+				cacheArgsHash := argsHash
+				cacheArgsForCache := argsForCache
+				if r.buildOnly {
+					cacheArgsHash = buildArgsHash
+					cacheArgsForCache = buildArgsForCache
+				}
+
 				relevantDirs := getProjectRelevantDirs(r.project, forwardGraph)
 				contentHash := computeContentHash(root, relevantDirs)
-				key := makeCacheKey(contentHash, argsHash, r.project.Path)
-				markCacheResult(db, key, time.Now(), false, []byte(r.output), argsForCache)
+				key := makeCacheKey(contentHash, cacheArgsHash, r.project.Path)
+				markCacheResult(db, key, time.Now(), false, []byte(r.output), cacheArgsForCache)
 				// Check if output was already printed in direct mode
 				alreadyPrinted := false
 				select {
@@ -2997,7 +3157,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				}
 
 				// Print failure inline with stats
-				term.ResultLine(false, skipIndicator, paddedName, durationStr, stats, "")
+				term.ResultLine(false, skipIndicator, paddedName, durationStr, stats, suffix)
 
 				if !*flagKeepGoing {
 					// Print output if not already printed
@@ -3047,7 +3207,40 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		}
 	}
 
-	term.Summary(succeeded, len(projects), len(cachedProjects), totalDuration, len(failures) == 0)
+	// Show summary - combined format if we have both tests and builds
+	if buildSucceeded > 0 || (len(buildOnlyProjects) > 0 && len(failures) > 0) {
+		testTotal := len(projects) - len(buildOnlyProjects)
+		buildTotal := len(buildOnlyProjects)
+
+		success := len(failures) == 0
+		color := colorGreen
+		if !success {
+			color = colorRed
+		}
+
+		if term.IsPlain() {
+			if len(cachedProjects) > 0 {
+				term.Printf("\n%d/%d tests succeeded, %d/%d builds succeeded, %d cached (%s)\n",
+					testSucceeded, testTotal, buildSucceeded, buildTotal, len(cachedProjects), totalDuration)
+			} else {
+				term.Printf("\n%d/%d tests succeeded, %d/%d builds succeeded (%s)\n",
+					testSucceeded, testTotal, buildSucceeded, buildTotal, totalDuration)
+			}
+		} else {
+			if len(cachedProjects) > 0 {
+				term.Printf("\n%s%d/%d tests succeeded%s, %s%d/%d builds succeeded%s, %s%d cached%s (%s)\n",
+					color, testSucceeded, testTotal, colorReset,
+					color, buildSucceeded, buildTotal, colorReset,
+					colorCyan, len(cachedProjects), colorReset, totalDuration)
+			} else {
+				term.Printf("\n%s%d/%d tests succeeded%s, %s%d/%d builds succeeded%s (%s)\n",
+					color, testSucceeded, testTotal, colorReset,
+					color, buildSucceeded, buildTotal, colorReset, totalDuration)
+			}
+		}
+	} else {
+		term.Summary(succeeded, len(projects), len(cachedProjects), totalDuration, len(failures) == 0)
+	}
 
 	// Print all outputs sorted by project name if requested
 	if *flagPrintOutput {
@@ -3857,7 +4050,7 @@ func runWatchMode(ctx *watchContext) {
 
 		term.Println()
 
-		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir, testFilter, nil, ctx.solutions)
+		runDotnetCommand(ctx.command, targetProjects, ctx.dotnetArgs, ctx.gitRoot, ctx.db, ctx.argsHash, ctx.forwardGraph, ctx.projectsByPath, nil, ctx.reportsDir, testFilter, nil, ctx.solutions, nil)
 
 		term.Info("\nWatching for changes...")
 	}
