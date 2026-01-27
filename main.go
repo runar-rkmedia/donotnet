@@ -1090,178 +1090,6 @@ func main() {
 	}
 }
 
-// findCompleteSolutionMatches finds solutions where ALL projects in the solution need building
-// Returns: map of solution -> projects, and slice of projects not fully covered by any solution
-func findCompleteSolutionMatches(projects []*Project, solutions []*Solution, gitRoot string) (map[*Solution][]*Project, []*Project) {
-	// Build set of absolute project paths -> project
-	projectByPath := make(map[string]*Project)
-	for _, p := range projects {
-		absPath := filepath.Join(gitRoot, p.Path)
-		projectByPath[absPath] = p
-	}
-
-	// Track which projects are assigned to a solution
-	assigned := make(map[string]bool)
-	result := make(map[*Solution][]*Project)
-
-	// For each solution, check if ALL its projects are in our target list
-	for _, sln := range solutions {
-		allInTarget := true
-		var slnProjects []*Project
-		for projPath := range sln.Projects {
-			if p, ok := projectByPath[projPath]; ok {
-				slnProjects = append(slnProjects, p)
-			} else {
-				allInTarget = false
-				break
-			}
-		}
-		// Only use solution if ALL its projects need building AND it has 2+ projects
-		if allInTarget && len(slnProjects) >= 2 {
-			// Check none are already assigned
-			anyAssigned := false
-			for _, p := range slnProjects {
-				if assigned[p.Path] {
-					anyAssigned = true
-					break
-				}
-			}
-			if !anyAssigned {
-				result[sln] = slnProjects
-				for _, p := range slnProjects {
-					assigned[p.Path] = true
-				}
-			}
-		}
-	}
-
-	// Collect remaining unassigned projects
-	var remaining []*Project
-	for _, p := range projects {
-		if !assigned[p.Path] {
-			remaining = append(remaining, p)
-		}
-	}
-
-	return result, remaining
-}
-
-// groupProjectsBySolution groups projects by which solution contains them (for --solution flag)
-// Returns: map of solution -> projects in that solution, and slice of projects not in any solution
-func groupProjectsBySolution(projects []*Project, solutions []*Solution, gitRoot string) (map[*Solution][]*Project, []*Project) {
-	// Build set of absolute project paths -> project
-	projectByPath := make(map[string]*Project)
-	for _, p := range projects {
-		absPath := filepath.Join(gitRoot, p.Path)
-		projectByPath[absPath] = p
-	}
-
-	// Track which projects are assigned to a solution
-	assigned := make(map[string]bool)
-	result := make(map[*Solution][]*Project)
-
-	// For each solution, find which of our target projects it contains
-	// Prefer solutions that contain more projects
-	type slnMatch struct {
-		sln      *Solution
-		projects []*Project
-	}
-	var matches []slnMatch
-
-	for _, sln := range solutions {
-		var slnProjects []*Project
-		for projPath := range sln.Projects {
-			if p, ok := projectByPath[projPath]; ok {
-				slnProjects = append(slnProjects, p)
-			}
-		}
-		if len(slnProjects) >= 2 {
-			matches = append(matches, slnMatch{sln: sln, projects: slnProjects})
-		}
-	}
-
-	// Sort by number of projects (descending) to prefer larger solutions
-	sort.Slice(matches, func(i, j int) bool {
-		return len(matches[i].projects) > len(matches[j].projects)
-	})
-
-	// Assign projects to solutions, avoiding duplicates
-	for _, m := range matches {
-		var unassigned []*Project
-		for _, p := range m.projects {
-			if !assigned[p.Path] {
-				unassigned = append(unassigned, p)
-			}
-		}
-		if len(unassigned) >= 2 {
-			result[m.sln] = unassigned
-			for _, p := range unassigned {
-				assigned[p.Path] = true
-			}
-		}
-	}
-
-	// Collect remaining unassigned projects
-	var remaining []*Project
-	for _, p := range projects {
-		if !assigned[p.Path] {
-			remaining = append(remaining, p)
-		}
-	}
-
-	return result, remaining
-}
-
-// findCommonSolution returns a solution that contains all the given projects, or nil if none exists
-func findCommonSolution(projects []*Project, solutions []*Solution, gitRoot string) *Solution {
-	if len(solutions) == 0 || len(projects) == 0 {
-		term.Verbose("findCommonSolution: no solutions (%d) or no projects (%d)", len(solutions), len(projects))
-		return nil
-	}
-
-	term.Verbose("findCommonSolution: checking %d solutions for %d projects", len(solutions), len(projects))
-
-	// Build set of absolute project paths
-	projectPaths := make(map[string]bool)
-	for _, p := range projects {
-		absPath := filepath.Join(gitRoot, p.Path)
-		projectPaths[absPath] = true
-		term.Verbose("  project: %s", absPath)
-	}
-
-	// Find a solution that contains ALL projects
-	for _, sln := range solutions {
-		term.Verbose("  checking solution: %s (%d projects)", sln.RelPath, len(sln.Projects))
-		allFound := true
-		var missing string
-		for projPath := range projectPaths {
-			if !sln.Projects[projPath] {
-				allFound = false
-				missing = projPath
-				break
-			}
-		}
-		if allFound {
-			term.Verbose("  -> matched!")
-			return sln
-		} else {
-			term.Verbose("  -> missing: %s", missing)
-			// Show first few solution projects for debugging
-			i := 0
-			for sp := range sln.Projects {
-				if i >= 3 {
-					term.Verbose("       ... and %d more", len(sln.Projects)-3)
-					break
-				}
-				term.Verbose("       has: %s", sp)
-				i++
-			}
-		}
-	}
-
-	return nil
-}
-
 func findChangedProjects(db *cache.DB, projects []*Project, root string, argsHash string, forwardGraph map[string][]string, vcsChangedFiles []string, useVcsFilter bool) map[string]bool {
 	changed := make(map[string]bool)
 	var mu sync.Mutex
@@ -1891,7 +1719,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	// Note: only test projects use solution optimization; build-only projects run individually
 	if !*flagNoSolution && len(testProjects) > 1 {
 		// First try: single solution containing all test projects
-		if sln := findCommonSolution(testProjects, solutions, root); sln != nil {
+		if sln := project.FindCommonSolution(testProjects, solutions, root); sln != nil {
 			// If we have build-only projects, can't use single solution path - need to run them too
 			if len(buildOnlyList) == 0 {
 				return runSolutionCommand(command, sln, testProjects, extraArgs, root, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, failedTestFilters)
@@ -1903,9 +1731,9 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		var slnGroups map[*Solution][]*Project
 		var remaining []*Project
 		if *flagSolution {
-			slnGroups, remaining = groupProjectsBySolution(testProjects, solutions, root)
+			slnGroups, remaining = project.GroupProjectsBySolution(testProjects, solutions, root)
 		} else {
-			slnGroups, remaining = findCompleteSolutionMatches(testProjects, solutions, root)
+			slnGroups, remaining = project.FindCompleteSolutionMatches(testProjects, solutions, root)
 		}
 
 		// Add build-only projects to the remaining list

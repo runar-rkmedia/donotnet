@@ -298,3 +298,146 @@ func TestFindUntestedProjects(t *testing.T) {
 		t.Errorf("Untested project = %q, want %q", untested[0].Name, "Unused")
 	}
 }
+
+func TestFindCompleteSolutionMatches(t *testing.T) {
+	gitRoot := "/repo"
+	projects := []*Project{
+		{Path: "App/App.csproj", Name: "App"},
+		{Path: "Core/Core.csproj", Name: "Core"},
+		{Path: "Other/Other.csproj", Name: "Other"},
+	}
+
+	// Solution contains App and Core (both in our target list)
+	sln := &Solution{
+		Path:    "/repo/MySolution.sln",
+		RelPath: "MySolution.sln",
+		Projects: map[string]bool{
+			"/repo/App/App.csproj":   true,
+			"/repo/Core/Core.csproj": true,
+		},
+	}
+	solutions := []*Solution{sln}
+
+	matched, remaining := FindCompleteSolutionMatches(projects, solutions, gitRoot)
+
+	if len(matched) != 1 {
+		t.Errorf("FindCompleteSolutionMatches returned %d matches, want 1", len(matched))
+	}
+	if len(matched[sln]) != 2 {
+		t.Errorf("Solution should have 2 projects, got %d", len(matched[sln]))
+	}
+	if len(remaining) != 1 {
+		t.Errorf("Should have 1 remaining project, got %d", len(remaining))
+	}
+	if len(remaining) > 0 && remaining[0].Name != "Other" {
+		t.Errorf("Remaining project = %q, want %q", remaining[0].Name, "Other")
+	}
+}
+
+func TestFindCompleteSolutionMatchesPartial(t *testing.T) {
+	gitRoot := "/repo"
+	projects := []*Project{
+		{Path: "App/App.csproj", Name: "App"},
+	}
+
+	// Solution contains App and Core, but only App is in target list
+	sln := &Solution{
+		Path:    "/repo/MySolution.sln",
+		RelPath: "MySolution.sln",
+		Projects: map[string]bool{
+			"/repo/App/App.csproj":   true,
+			"/repo/Core/Core.csproj": true,
+		},
+	}
+	solutions := []*Solution{sln}
+
+	matched, remaining := FindCompleteSolutionMatches(projects, solutions, gitRoot)
+
+	// Should not match because not ALL solution projects are in target
+	if len(matched) != 0 {
+		t.Errorf("FindCompleteSolutionMatches should return 0 matches for partial, got %d", len(matched))
+	}
+	if len(remaining) != 1 {
+		t.Errorf("All projects should be remaining, got %d", len(remaining))
+	}
+}
+
+func TestGroupProjectsBySolution(t *testing.T) {
+	gitRoot := "/repo"
+	projects := []*Project{
+		{Path: "App/App.csproj", Name: "App"},
+		{Path: "Core/Core.csproj", Name: "Core"},
+		{Path: "Other/Other.csproj", Name: "Other"},
+	}
+
+	// Solution contains App and Core
+	sln := &Solution{
+		Path:    "/repo/MySolution.sln",
+		RelPath: "MySolution.sln",
+		Projects: map[string]bool{
+			"/repo/App/App.csproj":   true,
+			"/repo/Core/Core.csproj": true,
+		},
+	}
+	solutions := []*Solution{sln}
+
+	grouped, remaining := GroupProjectsBySolution(projects, solutions, gitRoot)
+
+	if len(grouped) != 1 {
+		t.Errorf("GroupProjectsBySolution returned %d groups, want 1", len(grouped))
+	}
+	if len(grouped[sln]) != 2 {
+		t.Errorf("Solution group should have 2 projects, got %d", len(grouped[sln]))
+	}
+	if len(remaining) != 1 {
+		t.Errorf("Should have 1 remaining project, got %d", len(remaining))
+	}
+}
+
+func TestFindCommonSolution(t *testing.T) {
+	gitRoot := "/repo"
+	projects := []*Project{
+		{Path: "App/App.csproj", Name: "App"},
+		{Path: "Core/Core.csproj", Name: "Core"},
+	}
+
+	// Solution that contains both projects
+	sln := &Solution{
+		Path:    "/repo/MySolution.sln",
+		RelPath: "MySolution.sln",
+		Projects: map[string]bool{
+			"/repo/App/App.csproj":   true,
+			"/repo/Core/Core.csproj": true,
+			"/repo/Extra/Extra.csproj": true, // Extra project is fine
+		},
+	}
+	solutions := []*Solution{sln}
+
+	found := FindCommonSolution(projects, solutions, gitRoot)
+	if found != sln {
+		t.Error("FindCommonSolution should find the solution containing all projects")
+	}
+}
+
+func TestFindCommonSolutionNone(t *testing.T) {
+	gitRoot := "/repo"
+	projects := []*Project{
+		{Path: "App/App.csproj", Name: "App"},
+		{Path: "Core/Core.csproj", Name: "Core"},
+	}
+
+	// Solution that only contains App (not Core)
+	sln := &Solution{
+		Path:    "/repo/MySolution.sln",
+		RelPath: "MySolution.sln",
+		Projects: map[string]bool{
+			"/repo/App/App.csproj": true,
+		},
+	}
+	solutions := []*Solution{sln}
+
+	found := FindCommonSolution(projects, solutions, gitRoot)
+	if found != nil {
+		t.Error("FindCommonSolution should return nil when no solution contains all projects")
+	}
+}
