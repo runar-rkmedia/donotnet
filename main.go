@@ -863,8 +863,9 @@ func main() {
 		allProjects = append(allProjects, targetProjects...)
 
 		// Create test filter for non-watch mode (same filtering as watch mode)
+		// Skip when --force is used since that means "run everything"
 		var testFilter *TestFilter
-		if command == "test" && len(dirtyFiles) > 0 {
+		if command == "test" && len(dirtyFiles) > 0 && !*flagForce {
 			testFilter = NewTestFilter()
 
 			// Load per-test coverage maps for test filtering
@@ -1818,9 +1819,15 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				// Check if we can filter to specific tests (only in test command with testFilter)
 				var filteredTests bool
 				var testClasses []string
+				var argsBeforeOurFilter []string // Save args before adding our filter for retry
+				var userFilter string            // User's original --filter value
 				if projectCommand == "test" && testFilter != nil {
 					filterResult := testFilter.GetFilter(p.Path, root)
 					if filterResult.CanFilter {
+						// Save args before adding filter (for retry if no tests match)
+						argsBeforeOurFilter = make([]string, len(args))
+						copy(argsBeforeOurFilter, args)
+
 						// Check if user already has a --filter arg - if so, combine with AND
 						existingFilterIdx := -1
 						for i, arg := range extraArgs {
@@ -1840,6 +1847,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 							} else {
 								existingFilter = extraArgs[existingFilterIdx]
 							}
+							userFilter = existingFilter
 							combinedFilter := fmt.Sprintf("(%s)&(%s)", filterResult.TestFilter, existingFilter)
 							args = append(args, "--filter", combinedFilter)
 							filteredTests = true
@@ -1945,6 +1953,37 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					duration = time.Since(projectStart)
 					outputStr = output.String()
 					skippedRestore = false // We did restore this time
+				}
+
+				// Check if our test filter resulted in 0 matching tests - retry with just user filter
+				if filteredTests && strings.Contains(outputStr, "No test matches the given testcase filter") {
+					term.Warnf("  [%s] filter matched 0 tests, retrying without heuristic filter", p.Name)
+
+					// Build retry args: use saved args + user filter only
+					retryArgs := make([]string, len(argsBeforeOurFilter))
+					copy(retryArgs, argsBeforeOurFilter)
+					if userFilter != "" {
+						retryArgs = append(retryArgs, "--filter", userFilter)
+					}
+					retryArgs = append(retryArgs, extraArgs...)
+
+					// Run again without our filter
+					output.Reset()
+					projectStart = time.Now()
+					retryCmd := exec.CommandContext(ctx, "dotnet", retryArgs...)
+					setupProcessGroup(retryCmd)
+					retryCmd.Stdout = lineWriter
+					retryCmd.Stderr = lineWriter
+					retryCmd.Dir = root
+					retryCmd.Env = cmd.Env
+
+					term.Verbose("  [%s] dotnet %s", p.Name, strings.Join(retryArgs, " "))
+
+					err = retryCmd.Run()
+					duration = time.Since(projectStart)
+					outputStr = output.String()
+					filteredTests = false // No longer using our filter
+					testClasses = nil
 				}
 
 				// Save console output if reports enabled
@@ -2103,14 +2142,6 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			} else {
 				// Test job - show test stats
 				stats = extractTestStats(r.output)
-				// Add filter info if tests were filtered
-				if r.filteredTests && len(r.testClasses) > 0 {
-					if term.IsPlain() {
-						suffix = fmt.Sprintf("  [%s]", strings.Join(r.testClasses, ", "))
-					} else {
-						suffix = fmt.Sprintf("  %s[%s]%s", term.ColorCyan, strings.Join(r.testClasses, ", "), term.ColorReset)
-					}
-				}
 			}
 
 			if r.success {
