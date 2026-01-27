@@ -69,11 +69,12 @@ func versionString() string {
 
 // Project represents a parsed .csproj
 type Project struct {
-	Path       string
-	Dir        string
-	Name       string
-	References []string // paths to referenced projects
-	IsTest     bool
+	Path              string
+	Dir               string
+	Name              string
+	References        []string // paths to referenced projects
+	PackageReferences []string // NuGet package names
+	IsTest            bool
 }
 
 var (
@@ -109,6 +110,7 @@ var (
 	flagDevPlan            = flag.Bool("dev-plan", false, "Show job scheduling plan based on dependencies and exit")
 	flagNoSolution         = flag.Bool("no-solution", false, "Disable solution-level builds, always build individual projects")
 	flagSolution           = flag.Bool("solution", false, "Force solution-level builds even for single projects")
+	flagNoSuggestions      = flag.Bool("no-suggestions", false, "Disable performance suggestions")
 )
 
 func init() {
@@ -1081,6 +1083,12 @@ func main() {
 	}
 	defer db.Close()
 
+	// Run suggestions (once per session, before main output)
+	if !*flagNoSuggestions && command != "" {
+		suggestions := RunSuggestions(projects)
+		PrintSuggestions(suggestions)
+	}
+
 	// Get git state
 	commit := getGitCommit(gitRoot)
 	dirtyFiles := getGitDirtyFiles(gitRoot)
@@ -1795,6 +1803,7 @@ func findCommonSolution(projects []*Project, solutions []*Solution, gitRoot stri
 }
 
 var projectRefRegex = regexp.MustCompile(`<ProjectReference\s+Include="([^"]+)"`)
+var packageRefRegex = regexp.MustCompile(`<PackageReference\s+Include="([^"]+)"`)
 
 func parseProject(path, relPath string) (*Project, error) {
 	content, err := os.ReadFile(path)
@@ -1823,12 +1832,20 @@ func parseProject(path, relPath string) (*Project, error) {
 		refs = append(refs, absRef)
 	}
 
+	// Find package references (NuGet packages)
+	pkgMatches := packageRefRegex.FindAllStringSubmatch(string(content), -1)
+	var pkgRefs []string
+	for _, m := range pkgMatches {
+		pkgRefs = append(pkgRefs, m[1])
+	}
+
 	return &Project{
-		Path:       relPath,
-		Dir:        filepath.Dir(relPath),
-		Name:       name,
-		References: refs,
-		IsTest:     isTest,
+		Path:              relPath,
+		Dir:               filepath.Dir(relPath),
+		Name:              name,
+		References:        refs,
+		PackageReferences: pkgRefs,
+		IsTest:            isTest,
 	}, nil
 }
 
