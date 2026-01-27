@@ -824,6 +824,10 @@ func getFailedTestFilter(cachedOutput []byte, reportsDir, projectName string) st
 // ============================================================================
 
 func main() {
+	// Check for unknown flags and suggest corrections before flag.Parse() exits
+	if checkForUnknownFlags() {
+		os.Exit(2)
+	}
 	flag.Parse()
 
 	if *flagVersion {
