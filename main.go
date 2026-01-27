@@ -862,8 +862,32 @@ func main() {
 		}
 		allProjects = append(allProjects, targetProjects...)
 
+		// Create test filter for non-watch mode (same filtering as watch mode)
+		var testFilter *TestFilter
+		if command == "test" && len(dirtyFiles) > 0 {
+			testFilter = NewTestFilter()
+
+			// Load per-test coverage maps for test filtering
+			testCovMaps := loadAllTestCoverageMaps(gitRoot)
+			if len(testCovMaps) > 0 {
+				term.Verbose("Loaded per-test coverage for %d project(s)", len(testCovMaps))
+			}
+			testFilter.SetCoverageMaps(testCovMaps)
+			testFilter.SetHeuristics(ParseHeuristics(*flagHeuristics))
+
+			// Map dirty files to their owning projects
+			for _, f := range dirtyFiles {
+				for _, p := range projects {
+					if strings.HasPrefix(f, p.Dir+"/") || strings.HasPrefix(f, p.Dir+"\\") {
+						testFilter.AddChangedFile(p.Path, f)
+						break
+					}
+				}
+			}
+		}
+
 		if len(allProjects) > 0 {
-			success := runDotnetCommand(command, allProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, nil, failedTestFilters, solutions, buildOnlyMap)
+			success := runDotnetCommand(command, allProjects, dotnetArgs, gitRoot, db, argsHash, forwardGraph, projectsByPath, cachedProjects, reportsDir, testFilter, failedTestFilters, solutions, buildOnlyMap)
 			if !success {
 				os.Exit(1)
 			}
@@ -1656,6 +1680,27 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				prettyPrintFilter(projectName, filter)
 			}
 			term.Println()
+		}
+
+		// Print per-project filters from testFilter (based on changed files)
+		if testFilter != nil {
+			var hasFilters bool
+			for _, p := range projects {
+				if buildOnlyProjects != nil && buildOnlyProjects[p.Path] {
+					continue // skip build-only projects
+				}
+				result := testFilter.GetFilter(p.Path, root)
+				if result.CanFilter {
+					if !hasFilters {
+						term.Dim("Filtering tests based on changed files:")
+						hasFilters = true
+					}
+					prettyPrintFilter(p.Name, result.TestFilter)
+				}
+			}
+			if hasFilters {
+				term.Println()
+			}
 		}
 	}
 
