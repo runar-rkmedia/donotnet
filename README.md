@@ -75,6 +75,21 @@ By default, donotnet detects `.sln` files and uses solution-level builds when **
 - `-solution`: Use solution when 2+ projects in it need building
 - `-no-solution`: Always build individual projects
 
+### Untested project detection
+
+When running `donotnet test`, projects without test coverage are detected and **built** instead of tested. This prevents false confidence from running tests on a codebase where some projects have no tests at all.
+
+Detection uses the dependency graph: a non-test project is considered "untested" if no test project references it (directly or transitively). These projects are built alongside tests in the same worker pool, showing `(no tests)` in the output:
+
+```
+warning: 3 project(s) have no tests, will build instead: LibA, LibB, LibC
+Testing 12 projects + building 3 untested (8 workers)...
+  ✓ MyProject.Tests           1.6s  Failed: 0  Passed: 21  Total: 21
+  ✓ LibA                      0.4s (no tests)
+  ✓ LibB                      0.3s (no tests)
+  ...
+```
+
 ### Listing projects
 
 ```bash
