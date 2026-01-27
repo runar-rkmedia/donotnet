@@ -1795,7 +1795,27 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					args = append(args, "--logger", "trx;LogFileName="+trxPath)
 				}
 
-				args = append(args, extraArgs...)
+				// Filter out test-specific args for build-only projects
+				if isBuildOnly {
+					for i := 0; i < len(extraArgs); i++ {
+						arg := extraArgs[i]
+						// Skip --filter and its value
+						if arg == "--filter" {
+							i++ // skip the next arg (the filter value)
+							continue
+						}
+						if strings.HasPrefix(arg, "--filter=") {
+							continue
+						}
+						// Skip --blame flags (test-specific)
+						if arg == "--blame" || arg == "--blame-hang" || arg == "--blame-crash" {
+							continue
+						}
+						args = append(args, arg)
+					}
+				} else {
+					args = append(args, extraArgs...)
+				}
 
 				cmd := exec.CommandContext(ctx, "dotnet", args...)
 				setupProcessGroup(cmd)
