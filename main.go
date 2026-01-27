@@ -470,6 +470,10 @@ func main() {
 	dirtyFiles := git.GetDirtyFiles(gitRoot)
 	argsHash := hashArgs(append([]string{command}, dotnetArgs...)) // include command in hash
 
+	// Pre-compute build-specific hash for untested projects (filters out test-specific args)
+	buildArgs := filterBuildArgs(dotnetArgs)
+	buildArgsHash := hashArgs(append([]string{"build"}, buildArgs...))
+
 	term.Verbose("Git commit: %s", commit)
 	if len(dirtyFiles) > 0 {
 		term.Verbose("Dirty files: %d", len(dirtyFiles))
@@ -710,12 +714,23 @@ func main() {
 	// These will be built instead of tested to at least verify they compile
 	var untestedProjects []*Project
 	var untestedAffected []*Project
+	var untestedCached []*Project
 	if command == "test" {
 		untestedProjects = project.FindUntestedProjects(projects, forwardGraph)
-		// Filter to only affected untested projects
+		// Filter to only affected untested projects, checking cache with build-specific hash
 		for _, p := range untestedProjects {
 			if affected[p.Path] {
-				untestedAffected = append(untestedAffected, p)
+				// Re-check cache with build-specific hash (not test hash)
+				relevantDirs := project.GetRelevantDirs(p, forwardGraph)
+				contentHash := computeContentHash(gitRoot, relevantDirs)
+				key := cache.MakeKey(contentHash, buildArgsHash, p.Path)
+				if !*flagForce && db.Lookup(key) != nil {
+					// Build result is cached
+					untestedCached = append(untestedCached, p)
+					cachedProjects = append(cachedProjects, p)
+				} else {
+					untestedAffected = append(untestedAffected, p)
+				}
 			}
 		}
 		if len(untestedAffected) > 0 {
@@ -975,6 +990,28 @@ func hashArgs(args []string) string {
 	}
 	h := sha256.Sum256([]byte(strings.Join(args, "\x00")))
 	return fmt.Sprintf("%x", h[:8])
+}
+
+// filterBuildArgs removes test-specific arguments that shouldn't be passed to dotnet build
+func filterBuildArgs(args []string) []string {
+	var filtered []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		// Skip --filter and its value
+		if arg == "--filter" {
+			i++ // skip the next arg (the filter value)
+			continue
+		}
+		if strings.HasPrefix(arg, "--filter=") {
+			continue
+		}
+		// Skip --blame flags (test-specific)
+		if arg == "--blame" || arg == "--blame-hang" || arg == "--blame-crash" {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered
 }
 
 type runResult struct {
@@ -1489,10 +1526,13 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	argsForCache := strings.Join(append([]string{command}, extraArgs...), " ")
 
 	// Pre-compute build-specific hash and cache string for build-only projects
+	// Filter out test-specific args like --filter that don't apply to build
 	var buildArgsHash, buildArgsForCache string
+	var filteredBuildArgs []string
 	if len(buildOnlyProjects) > 0 {
-		buildArgsHash = hashArgs(append([]string{"build"}, extraArgs...))
-		buildArgsForCache = strings.Join(append([]string{"build"}, extraArgs...), " ")
+		filteredBuildArgs = filterBuildArgs(extraArgs)
+		buildArgsHash = hashArgs(append([]string{"build"}, filteredBuildArgs...))
+		buildArgsForCache = strings.Join(append([]string{"build"}, filteredBuildArgs...), " ")
 	}
 
 	// Separate build-only projects - they should always run individually, not via solutions
@@ -1795,24 +1835,9 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					args = append(args, "--logger", "trx;LogFileName="+trxPath)
 				}
 
-				// Filter out test-specific args for build-only projects
+				// Use filtered args for build-only projects (no --filter, --blame, etc.)
 				if isBuildOnly {
-					for i := 0; i < len(extraArgs); i++ {
-						arg := extraArgs[i]
-						// Skip --filter and its value
-						if arg == "--filter" {
-							i++ // skip the next arg (the filter value)
-							continue
-						}
-						if strings.HasPrefix(arg, "--filter=") {
-							continue
-						}
-						// Skip --blame flags (test-specific)
-						if arg == "--blame" || arg == "--blame-hang" || arg == "--blame-crash" {
-							continue
-						}
-						args = append(args, arg)
-					}
+					args = append(args, filteredBuildArgs...)
 				} else {
 					args = append(args, extraArgs...)
 				}
