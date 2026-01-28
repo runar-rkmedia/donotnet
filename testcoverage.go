@@ -14,10 +14,81 @@ import (
 	"sync"
 	"time"
 
+	"github.com/runar-rkmedia/donotnet/cache"
 	"github.com/runar-rkmedia/donotnet/coverage"
 	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/term"
 )
+
+// testLineRegex matches test names in dotnet test --list-tests output
+var testLineRegex = regexp.MustCompile(`^\s{4}(\S.+)$`)
+
+// CachedTestList holds the result of listing tests for a project
+type CachedTestList struct {
+	Tests   []string
+	FromCache bool
+}
+
+// getTestList returns the list of tests for a project, using cache if available.
+// If db is nil, caching is disabled.
+// The gitRoot is used for computing content hash and running commands.
+func getTestList(db *cache.DB, gitRoot string, p *Project, forwardGraph map[string][]string) (*CachedTestList, error) {
+	absProjectPath := filepath.Join(gitRoot, p.Path)
+
+	// Compute content hash for cache key (same pattern as build/test caching)
+	var contentHash string
+	if db != nil {
+		relevantDirs := project.GetRelevantDirs(p, forwardGraph)
+		contentHash = computeContentHash(gitRoot, relevantDirs)
+	}
+
+	// Check cache
+	if db != nil && contentHash != "" {
+		cacheKey := cache.MakeKey(contentHash, "listtests", p.Path)
+		if result := db.Lookup(cacheKey); result != nil {
+			// Parse cached output
+			tests := parseTestListOutput(string(result.Output))
+			return &CachedTestList{Tests: tests, FromCache: true}, nil
+		}
+	}
+
+	// Run dotnet test --list-tests
+	cmd := exec.Command("dotnet", "test", absProjectPath, "--list-tests", "--no-build")
+	cmd.Dir = gitRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse output
+	tests := parseTestListOutput(string(output))
+
+	// Cache the result
+	if db != nil && contentHash != "" {
+		cacheKey := cache.MakeKey(contentHash, "listtests", p.Path)
+		db.Mark(cacheKey, time.Now(), true, output, "listtests")
+	}
+
+	return &CachedTestList{Tests: tests, FromCache: false}, nil
+}
+
+// parseTestListOutput parses the output of dotnet test --list-tests
+func parseTestListOutput(output string) []string {
+	var tests []string
+	inTestList := false
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "The following Tests are available:") {
+			inTestList = true
+			continue
+		}
+		if inTestList {
+			if match := testLineRegex.FindStringSubmatch(line); match != nil {
+				tests = append(tests, strings.TrimSpace(match[1]))
+			}
+		}
+	}
+	return tests
+}
 
 // TestInfo represents test information for JSON output
 type TestInfo struct {
@@ -560,7 +631,7 @@ func hasCoverletCollector(projectPath string) bool {
 }
 
 // buildTestCoverageMaps builds per-test coverage maps for multiple projects
-func buildTestCoverageMaps(gitRoot string, projects []*Project, maxJobs int, granularity CoverageGranularity) {
+func buildTestCoverageMaps(db *cache.DB, gitRoot string, projects []*Project, forwardGraph map[string][]string, maxJobs int, granularity CoverageGranularity) {
 	cacheDir := filepath.Join(gitRoot, ".donotnet")
 	os.MkdirAll(cacheDir, 0755)
 
@@ -615,7 +686,7 @@ func buildTestCoverageMaps(gitRoot string, projects []*Project, maxJobs int, gra
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				buildSingleTestCoverageMap(gitRoot, p, cacheDir, 1, granularity) // sequential within project
+				buildSingleTestCoverageMap(db, gitRoot, p, forwardGraph, cacheDir, 1, granularity) // sequential within project
 			}
 		}()
 	}
@@ -628,37 +699,23 @@ func buildTestCoverageMaps(gitRoot string, projects []*Project, maxJobs int, gra
 }
 
 // buildSingleTestCoverageMap builds coverage map for a single test project
-func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, maxJobs int, granularity CoverageGranularity) {
+func buildSingleTestCoverageMap(db *cache.DB, gitRoot string, p *Project, forwardGraph map[string][]string, cacheDir string, maxJobs int, granularity CoverageGranularity) {
 	absProjectPath := filepath.Join(gitRoot, p.Path)
 	projectDir := filepath.Dir(absProjectPath)
 	mapFile := filepath.Join(cacheDir, p.Name+".testcoverage.json")
 
 	term.Info("Building per-test coverage map for %s", p.Name)
 
-	// Step 1: List all tests
+	// Step 1: List all tests (using cache if available)
 	term.Printf("  Listing tests...\n")
-	cmd := exec.Command("dotnet", "test", absProjectPath, "--list-tests", "--no-build")
-	cmd.Dir = gitRoot
-	output, err := cmd.Output()
+	testList, err := getTestList(db, gitRoot, p, forwardGraph)
 	if err != nil {
 		term.Errorf("  failed to list tests: %v", err)
 		return
 	}
-
-	// Parse test names
-	testLineRegex := regexp.MustCompile(`^\s{4}(\S.+)$`)
-	var tests []string
-	inTestList := false
-	for _, line := range strings.Split(string(output), "\n") {
-		if strings.Contains(line, "The following Tests are available:") {
-			inTestList = true
-			continue
-		}
-		if inTestList {
-			if match := testLineRegex.FindStringSubmatch(line); match != nil {
-				tests = append(tests, strings.TrimSpace(match[1]))
-			}
-		}
+	tests := testList.Tests
+	if testList.FromCache {
+		term.Verbose("  (from cache)")
 	}
 
 	if len(tests) == 0 {
@@ -873,8 +930,22 @@ func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, max
 	term.Success("  Processed %d/%d tests, %d files mapped → %s", covMap.ProcessedTests, len(tests), len(covMap.FileToTests), mapFile)
 }
 
+// coverageGroupingStats holds statistics for a single project's coverage groupings
+type coverageGroupingStats struct {
+	name           string
+	totalTests     int
+	uniqueTests    int
+	methodGroups   int
+	classGroups    int
+	fileGroups     int
+	classReduction float64
+	fileReduction  float64
+}
+
 // listTestCoverageGroupings lists how tests would be grouped for each granularity level
-func listTestCoverageGroupings(gitRoot string, projects []*Project) {
+func listTestCoverageGroupings(db *cache.DB, gitRoot string, projects []*Project, forwardGraph map[string][]string) {
+	var allStats []coverageGroupingStats
+
 	for _, p := range projects {
 		if !p.IsTest {
 			continue
@@ -885,29 +956,15 @@ func listTestCoverageGroupings(gitRoot string, projects []*Project) {
 
 		term.Info("%s", p.Name)
 
-		// List all tests
-		cmd := exec.Command("dotnet", "test", absProjectPath, "--list-tests", "--no-build")
-		cmd.Dir = gitRoot
-		output, err := cmd.Output()
+		// List all tests (using cache if available)
+		testList, err := getTestList(db, gitRoot, p, forwardGraph)
 		if err != nil {
 			term.Errorf("  failed to list tests: %v", err)
 			continue
 		}
-
-		// Parse test names
-		testLineRegex := regexp.MustCompile(`^\s{4}(\S.+)$`)
-		var tests []string
-		inTestList := false
-		for _, line := range strings.Split(string(output), "\n") {
-			if strings.Contains(line, "The following Tests are available:") {
-				inTestList = true
-				continue
-			}
-			if inTestList {
-				if match := testLineRegex.FindStringSubmatch(line); match != nil {
-					tests = append(tests, strings.TrimSpace(match[1]))
-				}
-			}
+		tests := testList.Tests
+		if testList.FromCache {
+			term.Verbose("  (from cache)")
 		}
 
 		if len(tests) == 0 {
@@ -966,17 +1023,177 @@ func listTestCoverageGroupings(gitRoot string, projects []*Project) {
 		}
 
 		term.Println()
+
+		// Collect stats for summary
+		allStats = append(allStats, coverageGroupingStats{
+			name:           p.Name,
+			totalTests:     len(tests),
+			uniqueTests:    len(uniqueTests),
+			methodGroups:   len(uniqueTests),
+			classGroups:    len(classGroups),
+			fileGroups:     len(fileGroups),
+			classReduction: classReduction,
+			fileReduction:  fileReduction,
+		})
+	}
+
+	// Print summary table if we have multiple projects
+	if len(allStats) > 0 {
+		printCoverageGroupingSummary(allStats)
 	}
 }
 
+// printCoverageGroupingSummary prints a summary table of coverage groupings
+func printCoverageGroupingSummary(stats []coverageGroupingStats) {
+	term.Println()
+	term.Info("Summary")
+	term.Println()
+
+	// Calculate totals
+	var totalTests, totalUnique, totalMethod, totalClass, totalFile int
+	for _, s := range stats {
+		totalTests += s.totalTests
+		totalUnique += s.uniqueTests
+		totalMethod += s.methodGroups
+		totalClass += s.classGroups
+		totalFile += s.fileGroups
+	}
+
+	// Calculate total reductions
+	methodReduction := 1.0
+	classReduction := float64(totalMethod) / float64(totalClass)
+	fileReduction := float64(totalMethod) / float64(totalFile)
+
+	// Find max reduction for coloring (higher = better = green)
+	reductions := []struct {
+		name      string
+		groups    int
+		reduction float64
+	}{
+		{"method", totalMethod, methodReduction},
+		{"class", totalClass, classReduction},
+		{"file", totalFile, fileReduction},
+	}
+
+	// Sort by reduction to determine colors
+	// method is always slowest (1.0x), so red
+	// file is usually fastest, so green
+	// class is in between, so yellow
+
+	// Calculate column widths
+	nameWidth := 10
+	for _, s := range stats {
+		if len(s.name) > nameWidth {
+			nameWidth = len(s.name)
+		}
+	}
+
+	// Print header
+	if term.IsPlain() {
+		term.Printf("  %-*s  %8s  %8s  %8s  %8s  %8s\n",
+			nameWidth, "Project", "Tests", "Method", "Class", "File", "Best")
+		term.Printf("  %s  %s  %s  %s  %s  %s\n",
+			strings.Repeat("-", nameWidth),
+			strings.Repeat("-", 8),
+			strings.Repeat("-", 8),
+			strings.Repeat("-", 8),
+			strings.Repeat("-", 8),
+			strings.Repeat("-", 8))
+	} else {
+		term.Printf("  %s%-*s  %8s  %8s  %8s  %8s  %8s%s\n",
+			term.Color(term.ColorBold), nameWidth, "Project", "Tests", "Method", "Class", "File", "Best", term.Color(term.ColorReset))
+	}
+
+	// Print each project row
+	for _, s := range stats {
+		// Determine best option and colors for this project
+		// When class and file are equal, prefer class (simpler to compute)
+		best := "class"
+		classColor := term.ColorGreen
+		fileColor := term.ColorGreen
+		if s.fileGroups < s.classGroups {
+			// File is strictly better
+			best = "file"
+			classColor = term.ColorYellow
+		} else if s.classGroups < s.fileGroups {
+			// Class is strictly better (rare, but possible)
+			fileColor = term.ColorYellow
+		}
+		// When equal, both stay green and best stays "class"
+
+		if term.IsPlain() {
+			term.Printf("  %-*s  %8d  %8d  %8d  %8d  %8s\n",
+				nameWidth, s.name, s.uniqueTests, s.methodGroups, s.classGroups, s.fileGroups, best)
+		} else {
+			term.Printf("  %-*s  %8d  %s%8d%s  %s%8d%s  %s%8d%s  %s%s%s\n",
+				nameWidth, s.name, s.uniqueTests,
+				term.Color(term.ColorRed), s.methodGroups, term.Color(term.ColorReset),
+				term.Color(classColor), s.classGroups, term.Color(term.ColorReset),
+				term.Color(fileColor), s.fileGroups, term.Color(term.ColorReset),
+				term.Color(term.ColorGreen), best, term.Color(term.ColorReset))
+		}
+	}
+
+	// Determine colors for totals (same logic as per-project)
+	totalClassColor := term.ColorGreen
+	totalFileColor := term.ColorGreen
+	if totalFile < totalClass {
+		totalClassColor = term.ColorYellow
+	} else if totalClass < totalFile {
+		totalFileColor = term.ColorYellow
+	}
+
+	// Print totals row
+	if term.IsPlain() {
+		term.Printf("  %s  %s  %s  %s  %s  %s\n",
+			strings.Repeat("-", nameWidth),
+			strings.Repeat("-", 8),
+			strings.Repeat("-", 8),
+			strings.Repeat("-", 8),
+			strings.Repeat("-", 8),
+			strings.Repeat("-", 8))
+		term.Printf("  %-*s  %8d  %8d  %8d  %8d\n",
+			nameWidth, "TOTAL", totalUnique, totalMethod, totalClass, totalFile)
+		term.Printf("  %-*s  %8s  %8s  %7.1fx  %7.1fx\n",
+			nameWidth, "Reduction", "", "1.0x",
+			classReduction, fileReduction)
+	} else {
+		term.Printf("  %s%s%s\n", term.Color(term.ColorDim),
+			strings.Repeat("─", nameWidth+2+9+9+9+9+9), term.Color(term.ColorReset))
+		term.Printf("  %s%-*s%s  %8d  %s%8d%s  %s%8d%s  %s%8d%s\n",
+			term.Color(term.ColorBold), nameWidth, "TOTAL", term.Color(term.ColorReset),
+			totalUnique,
+			term.Color(term.ColorRed), totalMethod, term.Color(term.ColorReset),
+			term.Color(totalClassColor), totalClass, term.Color(term.ColorReset),
+			term.Color(totalFileColor), totalFile, term.Color(term.ColorReset))
+		term.Printf("  %s%-*s%s  %8s  %s%8s%s  %s%7.1fx%s  %s%7.1fx%s\n",
+			term.Color(term.ColorBold), nameWidth, "Reduction", term.Color(term.ColorReset),
+			"",
+			term.Color(term.ColorRed), "1.0x", term.Color(term.ColorReset),
+			term.Color(totalClassColor), classReduction, term.Color(term.ColorReset),
+			term.Color(totalFileColor), fileReduction, term.Color(term.ColorReset))
+	}
+
+	term.Println()
+
+	// Print recommendation
+	recommended := "class"
+	if fileReduction > classReduction*1.2 {
+		recommended = "file"
+	}
+	term.Printf("  %sRecommendation:%s Use %s-coverage-granularity=%s%s%s for %.1fx speedup\n",
+		term.Color(term.ColorDim), term.Color(term.ColorReset),
+		term.Color(term.ColorGreen), recommended, term.Color(term.ColorReset),
+		term.Color(term.ColorDim),
+		reductions[1].reduction) // class reduction as baseline recommendation
+	term.Println()
+}
+
 // listAllTests runs dotnet test --list-tests on each project and outputs JSON
-func listAllTests(gitRoot string, projects []*Project) {
+func listAllTests(db *cache.DB, gitRoot string, projects []*Project, forwardGraph map[string][]string) {
 	var results []TestInfo
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-
-	// Regex to detect test names (lines starting with whitespace followed by qualified name)
-	testLineRegex := regexp.MustCompile(`^\s{4}(\S.+)$`)
 
 	numWorkers := runtime.GOMAXPROCS(0)
 	if numWorkers > len(projects) {
@@ -989,35 +1206,17 @@ func listAllTests(gitRoot string, projects []*Project) {
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				projectPath := filepath.Join(gitRoot, p.Path)
-				cmd := exec.Command("dotnet", "test", projectPath, "--list-tests", "--no-build")
-				cmd.Dir = gitRoot
-				output, err := cmd.Output()
+				testList, err := getTestList(db, gitRoot, p, forwardGraph)
 				if err != nil {
 					term.Verbose("  [%s] failed to list tests: %v", p.Name, err)
 					continue
 				}
 
-				// Parse output for test names
-				var tests []string
-				inTestList := false
-				for _, line := range strings.Split(string(output), "\n") {
-					if strings.Contains(line, "The following Tests are available:") {
-						inTestList = true
-						continue
-					}
-					if inTestList {
-						if match := testLineRegex.FindStringSubmatch(line); match != nil {
-							tests = append(tests, strings.TrimSpace(match[1]))
-						}
-					}
-				}
-
 				mu.Lock()
 				results = append(results, TestInfo{
 					Project: p.Name,
-					Tests:   tests,
-					Count:   len(tests),
+					Tests:   testList.Tests,
+					Count:   len(testList.Tests),
 				})
 				mu.Unlock()
 			}

@@ -105,7 +105,7 @@ var (
 	flagSolution           = flag.Bool("solution", false, "Force solution-level builds even for single projects")
 	flagNoSuggestions      = flag.Bool("no-suggestions", false, "Disable performance suggestions")
 	flagStalenessCheck        = flag.String("staleness-check", "git", "Coverage staleness check method: git, mtime, or both")
-	flagCoverageGranularity   = flag.String("coverage-granularity", "method", "Coverage map granularity: method (precise), class (faster), or file (fastest)")
+	flagCoverageGranularity   = flag.String("coverage-granularity", "class", "Coverage map granularity: method (precise), class (faster, default), or file (fastest)")
 	flagListTestCoverage      = flag.Bool("list-test-coverage", false, "List test groupings for each coverage granularity level (dry-run)")
 )
 
@@ -695,7 +695,7 @@ func main() {
 			term.Dim("No test projects found")
 			return
 		}
-		listAllTests(gitRoot, testProjects)
+		listAllTests(db, gitRoot, testProjects, forwardGraph)
 		return
 	}
 
@@ -711,7 +711,7 @@ func main() {
 			term.Dim("No test projects found")
 			return
 		}
-		listTestCoverageGroupings(gitRoot, testProjects)
+		listTestCoverageGroupings(db, gitRoot, testProjects, forwardGraph)
 		return
 	}
 
@@ -727,7 +727,7 @@ func main() {
 			term.Dim("No test projects found")
 			return
 		}
-		buildTestCoverageMaps(gitRoot, testProjects, *flagParallel, ParseCoverageGranularity(*flagCoverageGranularity))
+		buildTestCoverageMaps(db, gitRoot, testProjects, forwardGraph, *flagParallel, ParseCoverageGranularity(*flagCoverageGranularity))
 		return
 	}
 
