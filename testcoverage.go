@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/runar-rkmedia/donotnet/coverage"
+	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/term"
 )
 
@@ -61,6 +62,281 @@ func saveTestCoverageMap(path string, m *TestCoverageMap) error {
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	return enc.Encode(m)
+}
+
+// CoverageStaleness represents the staleness state of coverage data
+type CoverageStaleness int
+
+const (
+	CoverageNotFound CoverageStaleness = iota
+	CoverageStale
+	CoverageFresh
+)
+
+// StalenessCheckMethod specifies how to check for stale coverage
+type StalenessCheckMethod int
+
+const (
+	StalenessCheckGit   StalenessCheckMethod = iota // Check git for changed files since coverage generation
+	StalenessCheckMtime                             // Check file modification times
+	StalenessCheckBoth                              // Check both git and mtime, report stale if either finds changes
+)
+
+// CoverageStatus contains detailed information about coverage staleness
+type CoverageStatus struct {
+	Staleness     CoverageStaleness
+	ChangedFiles  []string  // Files that changed since coverage was generated
+	OldestCoverage time.Time // When the oldest coverage was generated
+}
+
+// relevantForCoverage returns true if a file path is relevant for coverage staleness
+// Uses the shared filter from project package
+func relevantForCoverage(path string) bool {
+	return project.IsRelevantForCoverage(path)
+}
+
+// CheckCoverageStalenessGit checks staleness by looking at git changes since coverage generation
+func CheckCoverageStalenessGit(gitRoot string) CoverageStatus {
+	cacheDir := filepath.Join(gitRoot, ".donotnet")
+
+	// Find oldest coverage generation time
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return CoverageStatus{Staleness: CoverageNotFound}
+	}
+
+	var oldestGenerated time.Time
+	foundAny := false
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".testcoverage.json") {
+			continue
+		}
+		path := filepath.Join(cacheDir, entry.Name())
+		covMap, err := loadTestCoverageMap(path)
+		if err != nil {
+			continue
+		}
+		foundAny = true
+		if oldestGenerated.IsZero() || covMap.GeneratedAt.Before(oldestGenerated) {
+			oldestGenerated = covMap.GeneratedAt
+		}
+	}
+
+	if !foundAny {
+		return CoverageStatus{Staleness: CoverageNotFound}
+	}
+
+	// Get files changed since coverage was generated
+	changedFiles := getFilesChangedSince(gitRoot, oldestGenerated)
+
+	// Filter to relevant files only
+	var relevantChanges []string
+	for _, f := range changedFiles {
+		if relevantForCoverage(f) {
+			relevantChanges = append(relevantChanges, f)
+		}
+	}
+
+	if len(relevantChanges) > 0 {
+		return CoverageStatus{
+			Staleness:      CoverageStale,
+			ChangedFiles:   relevantChanges,
+			OldestCoverage: oldestGenerated,
+		}
+	}
+
+	return CoverageStatus{Staleness: CoverageFresh, OldestCoverage: oldestGenerated}
+}
+
+// CheckCoverageStalenessMtime checks staleness by comparing file modification times
+func CheckCoverageStalenessMtime(gitRoot string) CoverageStatus {
+	cacheDir := filepath.Join(gitRoot, ".donotnet")
+
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return CoverageStatus{Staleness: CoverageNotFound}
+	}
+
+	var oldestGenerated time.Time
+	coveredFiles := make(map[string]bool)
+	foundAny := false
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".testcoverage.json") {
+			continue
+		}
+		path := filepath.Join(cacheDir, entry.Name())
+		covMap, err := loadTestCoverageMap(path)
+		if err != nil {
+			continue
+		}
+		foundAny = true
+		if oldestGenerated.IsZero() || covMap.GeneratedAt.Before(oldestGenerated) {
+			oldestGenerated = covMap.GeneratedAt
+		}
+		// Collect all covered files
+		for f := range covMap.FileToTests {
+			coveredFiles[f] = true
+		}
+	}
+
+	if !foundAny {
+		return CoverageStatus{Staleness: CoverageNotFound}
+	}
+
+	// Check mtime of covered files
+	var modifiedFiles []string
+	for relPath := range coveredFiles {
+		absPath := filepath.Join(gitRoot, relPath)
+		info, err := os.Stat(absPath)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(oldestGenerated) {
+			modifiedFiles = append(modifiedFiles, relPath)
+		}
+	}
+
+	if len(modifiedFiles) > 0 {
+		return CoverageStatus{
+			Staleness:      CoverageStale,
+			ChangedFiles:   modifiedFiles,
+			OldestCoverage: oldestGenerated,
+		}
+	}
+
+	return CoverageStatus{Staleness: CoverageFresh, OldestCoverage: oldestGenerated}
+}
+
+// getFilesChangedSince returns files changed (committed or uncommitted) since the given time
+func getFilesChangedSince(gitRoot string, since time.Time) []string {
+	filesMap := make(map[string]bool)
+
+	// Get committed changes since the time
+	sinceStr := since.Format("2006-01-02T15:04:05")
+	cmd := exec.Command("git", "-C", gitRoot, "log", "--name-only", "--pretty=format:", "--since="+sinceStr)
+	out, err := cmd.Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				filesMap[line] = true
+			}
+		}
+	}
+
+	// Also get uncommitted changes (dirty files)
+	cmd = exec.Command("git", "-C", gitRoot, "status", "--porcelain")
+	out, err = cmd.Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if len(line) < 3 {
+				continue
+			}
+			file := strings.TrimSpace(line[3:])
+			if idx := strings.Index(file, " -> "); idx >= 0 {
+				file = file[idx+4:]
+			}
+			if file != "" {
+				filesMap[file] = true
+			}
+		}
+	}
+
+	var files []string
+	for f := range filesMap {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	return files
+}
+
+// ParseStalenessCheckMethod parses a staleness check method from string
+// Valid values: "git", "mtime", "both" (defaults to "git")
+func ParseStalenessCheckMethod(s string) StalenessCheckMethod {
+	switch strings.ToLower(s) {
+	case "mtime":
+		return StalenessCheckMtime
+	case "both":
+		return StalenessCheckBoth
+	default:
+		return StalenessCheckGit
+	}
+}
+
+// CheckCoverageStalenessWithMethod checks coverage staleness using the specified method
+func CheckCoverageStalenessWithMethod(gitRoot string, method StalenessCheckMethod) CoverageStatus {
+	switch method {
+	case StalenessCheckMtime:
+		return CheckCoverageStalenessMtime(gitRoot)
+	case StalenessCheckBoth:
+		// Check both methods and combine results
+		gitStatus := CheckCoverageStalenessGit(gitRoot)
+		mtimeStatus := CheckCoverageStalenessMtime(gitRoot)
+
+		// If either is not found, report not found
+		if gitStatus.Staleness == CoverageNotFound || mtimeStatus.Staleness == CoverageNotFound {
+			return CoverageStatus{Staleness: CoverageNotFound}
+		} else if gitStatus.Staleness == CoverageStale || mtimeStatus.Staleness == CoverageStale {
+			// Combine changed files from both methods (deduplicated)
+			filesMap := make(map[string]bool)
+			for _, f := range gitStatus.ChangedFiles {
+				filesMap[f] = true
+			}
+			for _, f := range mtimeStatus.ChangedFiles {
+				filesMap[f] = true
+			}
+			var combined []string
+			for f := range filesMap {
+				combined = append(combined, f)
+			}
+			sort.Strings(combined)
+
+			oldestCov := gitStatus.OldestCoverage
+			if mtimeStatus.OldestCoverage.Before(oldestCov) {
+				oldestCov = mtimeStatus.OldestCoverage
+			}
+			return CoverageStatus{
+				Staleness:      CoverageStale,
+				ChangedFiles:   combined,
+				OldestCoverage: oldestCov,
+			}
+		} else {
+			return CoverageStatus{Staleness: CoverageFresh, OldestCoverage: gitStatus.OldestCoverage}
+		}
+	default:
+		return CheckCoverageStalenessGit(gitRoot)
+	}
+}
+
+// GetCoverageSuggestion returns a suggestion for coverage rebuild if appropriate
+// Returns nil if no suggestion is needed
+func GetCoverageSuggestion(gitRoot string, method StalenessCheckMethod) *Suggestion {
+	status := CheckCoverageStalenessWithMethod(gitRoot, method)
+
+	switch status.Staleness {
+	case CoverageNotFound:
+		return &Suggestion{
+			ID:          "coverage-not-found",
+			Title:       "Enable coverage-based test filtering",
+			Description: "Run with --build-test-coverage to enable coverage-based test filtering",
+		}
+	case CoverageStale:
+		var desc string
+		if len(status.ChangedFiles) <= 3 {
+			desc = fmt.Sprintf("Coverage may be stale (%s changed). Run --build-test-coverage to update",
+				strings.Join(status.ChangedFiles, ", "))
+		} else {
+			desc = fmt.Sprintf("Coverage may be stale (%d file(s) changed). Run --build-test-coverage to update",
+				len(status.ChangedFiles))
+		}
+		return &Suggestion{
+			ID:          "coverage-stale",
+			Title:       "Update test coverage data",
+			Description: desc,
+		}
+	}
+	return nil
 }
 
 // loadAllTestCoverageMaps loads all .testcoverage.json files from the cache directory

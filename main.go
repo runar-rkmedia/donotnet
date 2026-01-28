@@ -104,6 +104,7 @@ var (
 	flagNoSolution         = flag.Bool("no-solution", false, "Disable solution-level builds, always build individual projects")
 	flagSolution           = flag.Bool("solution", false, "Force solution-level builds even for single projects")
 	flagNoSuggestions      = flag.Bool("no-suggestions", false, "Disable performance suggestions")
+	flagStalenessCheck     = flag.String("staleness-check", "git", "Coverage staleness check method: git, mtime, or both")
 )
 
 func init() {
@@ -775,6 +776,9 @@ func main() {
 			if len(testCovMaps) > 0 {
 				term.Verbose("Loaded per-test coverage for %d project(s)", len(testCovMaps))
 			}
+			if !*flagNoSuggestions {
+				PrintSuggestionOnce(GetCoverageSuggestion(gitRoot, ParseStalenessCheckMethod(*flagStalenessCheck)))
+			}
 
 			testFilter := NewTestFilter()
 			testFilter.SetCoverageMaps(testCovMaps)
@@ -861,6 +865,11 @@ func main() {
 			allProjects = append(allProjects, untestedAffected...)
 		}
 		allProjects = append(allProjects, targetProjects...)
+
+		// Show coverage suggestion for test commands
+		if command == "test" && !*flagNoSuggestions {
+			PrintSuggestionOnce(GetCoverageSuggestion(gitRoot, ParseStalenessCheckMethod(*flagStalenessCheck)))
+		}
 
 		// Create test filter for non-watch mode (same filtering as watch mode)
 		// Skip when --force is used since that means "run everything"

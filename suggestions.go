@@ -94,6 +94,18 @@ func RunSuggestions(projects []*Project) []Suggestion {
 	return suggestions
 }
 
+// PrintSuggestionOnce prints a suggestion if it hasn't been shown this session
+func PrintSuggestionOnce(s *Suggestion) {
+	if s == nil {
+		return
+	}
+	if shownSuggestions[s.ID] {
+		return
+	}
+	shownSuggestions[s.ID] = true
+	PrintSuggestions([]Suggestion{*s})
+}
+
 // PrintSuggestions outputs suggestions using the terminal
 func PrintSuggestions(suggestions []Suggestion) {
 	if len(suggestions) == 0 {
