@@ -55,6 +55,11 @@ type FilterResult struct {
 	Reason string
 	// TestClasses lists the test classes that will be run
 	TestClasses []string
+	// ExcludedByUserFilter is true if all matched tests would be excluded by user's --filter
+	// When true, the caller should skip running tests entirely
+	ExcludedByUserFilter bool
+	// ExcludedTraits lists the traits that caused exclusion (for verbose output)
+	ExcludedTraits []string
 }
 
 // SetCoverageMaps sets the per-test coverage maps for coverage-based filtering
@@ -63,12 +68,19 @@ func (tf *TestFilter) SetCoverageMaps(maps map[string]*TestCoverageMap) {
 }
 
 // GetFilter analyzes changed files for a project and returns a filter if possible
-func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult {
+// userFilter is the user's --filter argument (e.g., "Category!=Live") used to detect
+// when all matched tests would be excluded
+func (tf *TestFilter) GetFilter(projectPath string, gitRoot string, userFilter string) FilterResult {
+	// Parse user filter for category exclusions
+	excludedCategories := ParseFilterExclusions(userFilter)
+
 	// First, try coverage-based filtering using all changed files
 	// This works even when the changed file is in a different project than the test project
 	if len(tf.AllChangedFiles) > 0 && len(tf.CoverageMaps) > 0 {
 		result := tf.getFilterWithCoverage(projectPath, tf.AllChangedFiles, nil)
 		if result.CanFilter {
+			// Check if all tests would be excluded by user filter
+			result = tf.checkUserFilterExclusion(result, gitRoot, excludedCategories)
 			return result
 		}
 		// If coverage lookup found no tests or file not covered, try heuristics
@@ -78,6 +90,8 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 	if len(tf.AllChangedFiles) > 0 {
 		result := tf.getFilterWithHeuristics(tf.AllChangedFiles, gitRoot)
 		if result.CanFilter {
+			// Check if all tests would be excluded by user filter
+			result = tf.checkUserFilterExclusion(result, gitRoot, excludedCategories)
 			return result
 		}
 	}
@@ -131,12 +145,87 @@ func (tf *TestFilter) GetFilter(projectPath string, gitRoot string) FilterResult
 	}
 	filter := strings.Join(filterParts, "|")
 
-	return FilterResult{
+	result := FilterResult{
 		CanFilter:   true,
 		TestFilter:  filter,
 		Reason:      fmt.Sprintf("only test files changed: %s", strings.Join(testClasses, ", ")),
 		TestClasses: testClasses,
 	}
+
+	// Check if all tests would be excluded by user filter
+	result = tf.checkUserFilterExclusion(result, gitRoot, excludedCategories)
+	return result
+}
+
+// checkUserFilterExclusion checks if all test classes in the result would be excluded
+// by the user's category filter (e.g., Category!=Live)
+func (tf *TestFilter) checkUserFilterExclusion(result FilterResult, gitRoot string, excludedCategories []string) FilterResult {
+	if len(excludedCategories) == 0 || !result.CanFilter {
+		return result
+	}
+
+	// Check each changed file that corresponds to a test class
+	var allExcludedTraits []string
+	allExcluded := true
+	matchedFilesCount := 0
+
+	for _, file := range tf.AllChangedFiles {
+		// Only check .cs files that look like test files
+		if !strings.HasSuffix(strings.ToLower(file), ".cs") {
+			continue
+		}
+
+		fileName := filepath.Base(file)
+		nameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+
+		// Check if this file corresponds to one of our test classes
+		isMatchedTestFile := false
+		for _, class := range result.TestClasses {
+			if class == nameWithoutExt {
+				isMatchedTestFile = true
+				break
+			}
+		}
+
+		if !isMatchedTestFile {
+			continue
+		}
+
+		matchedFilesCount++
+
+		// Read file content and analyze if ALL test methods would be excluded
+		fullPath := filepath.Join(gitRoot, file)
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			// Can't read file, be conservative and don't exclude
+			allExcluded = false
+			break
+		}
+
+		excluded, traits, testCount := AreAllTestsExcludedInFile(string(content), excludedCategories)
+		if testCount == 0 {
+			// No test methods found - be conservative, don't skip
+			allExcluded = false
+			break
+		}
+
+		if excluded {
+			allExcludedTraits = append(allExcludedTraits, traits...)
+		} else {
+			// Not all tests in this file are excluded
+			allExcluded = false
+			break
+		}
+	}
+
+	if allExcluded && matchedFilesCount > 0 && len(allExcludedTraits) > 0 {
+		// All matched test files have only excluded categories
+		result.ExcludedByUserFilter = true
+		result.ExcludedTraits = uniqueStrings(allExcludedTraits)
+		result.Reason = fmt.Sprintf("all tests excluded by user filter (traits: %s)", strings.Join(result.ExcludedTraits, ", "))
+	}
+
+	return result
 }
 
 // getFilterWithHeuristics uses naming conventions to guess which tests to run
@@ -404,6 +493,277 @@ func (tf *TestFilter) analyzeFile(filePath string, gitRoot string) (string, bool
 // Regex to find test attributes in C# code
 var testAttributeRegex = regexp.MustCompile(`\[(Test|Fact|Theory|TestMethod|TestCase)\b`)
 var classRegex = regexp.MustCompile(`\bclass\s+(\w+)`)
+
+// Regex patterns for extracting category/trait attributes from C# test files
+// Matches: [Category("Live")], [Trait("Category", "Live")], [TestCategory("Live")]
+var (
+	// NUnit style: [Category("Live")]
+	categoryAttrRegex = regexp.MustCompile(`\[Category\s*\(\s*"([^"]+)"\s*\)\]`)
+	// xUnit style: [Trait("Category", "Live")]
+	traitAttrRegex = regexp.MustCompile(`\[Trait\s*\(\s*"Category"\s*,\s*"([^"]+)"\s*\)\]`)
+	// MSTest style: [TestCategory("Live")]
+	testCategoryAttrRegex = regexp.MustCompile(`\[TestCategory\s*\(\s*"([^"]+)"\s*\)\]`)
+	// Filter exclusion pattern: Category!=Live or Category != Live
+	filterExclusionRegex = regexp.MustCompile(`Category\s*!=\s*(\w+)`)
+	// Class definition with optional attributes above it
+	// Captures: attributes block (group 1), class name (group 2)
+	classBlockRegex = regexp.MustCompile(`(?ms)((?:\[[^\]]+\]\s*)*)\s*(?:public\s+|internal\s+|private\s+|protected\s+)*(?:abstract\s+|sealed\s+|static\s+)*class\s+(\w+)`)
+	// Test method with optional attributes above it
+	// Captures: attributes block (group 1), method name (group 2)
+	testMethodBlockRegex = regexp.MustCompile(`(?ms)((?:\[[^\]]+\]\s*)+)\s*(?:public\s+|private\s+|protected\s+|internal\s+)?(?:async\s+)?(?:Task|void|\w+)\s+(\w+)\s*\(`)
+)
+
+// ExtractCategoryTraits extracts all category traits from a C# test file
+// Returns a slice of category names found (e.g., ["Live", "Slow"])
+func ExtractCategoryTraits(filePath string) []string {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
+	}
+	return ExtractCategoryTraitsFromContent(string(content))
+}
+
+// ExtractCategoryTraitsFromContent extracts category traits from file content
+func ExtractCategoryTraitsFromContent(content string) []string {
+	// Strip comments before processing to avoid matching commented-out attributes
+	content = stripCSharpComments(content)
+	traitsMap := make(map[string]bool)
+
+	// Find all Category attributes (NUnit)
+	for _, match := range categoryAttrRegex.FindAllStringSubmatch(content, -1) {
+		if len(match) >= 2 {
+			traitsMap[match[1]] = true
+		}
+	}
+
+	// Find all Trait("Category", "...") attributes (xUnit)
+	for _, match := range traitAttrRegex.FindAllStringSubmatch(content, -1) {
+		if len(match) >= 2 {
+			traitsMap[match[1]] = true
+		}
+	}
+
+	// Find all TestCategory attributes (MSTest)
+	for _, match := range testCategoryAttrRegex.FindAllStringSubmatch(content, -1) {
+		if len(match) >= 2 {
+			traitsMap[match[1]] = true
+		}
+	}
+
+	var traits []string
+	for trait := range traitsMap {
+		traits = append(traits, trait)
+	}
+	return traits
+}
+
+// stripCSharpComments removes C# single-line comments from content
+// This is a simple implementation that handles the common case of // comments
+func stripCSharpComments(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+	for _, line := range lines {
+		// Find // that's not inside a string literal
+		// Simple heuristic: just look for // and truncate
+		// This may incorrectly truncate strings containing //, but that's rare in attributes
+		if idx := strings.Index(line, "//"); idx >= 0 {
+			line = line[:idx]
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n")
+}
+
+// ParseFilterExclusions extracts excluded categories from a dotnet test filter
+// e.g., "Category!=Live" returns ["Live"]
+// e.g., "Category!=Live&Category!=Slow" returns ["Live", "Slow"]
+func ParseFilterExclusions(filter string) []string {
+	var exclusions []string
+	for _, match := range filterExclusionRegex.FindAllStringSubmatch(filter, -1) {
+		if len(match) >= 2 {
+			exclusions = append(exclusions, match[1])
+		}
+	}
+	return exclusions
+}
+
+// AreAllTraitsExcluded checks if all traits in the list are excluded by the filter
+// Returns true if the traits list is non-empty and ALL of them are in the exclusion list
+func AreAllTraitsExcluded(traits []string, excludedCategories []string) bool {
+	if len(traits) == 0 || len(excludedCategories) == 0 {
+		return false
+	}
+
+	excludedMap := make(map[string]bool)
+	for _, cat := range excludedCategories {
+		excludedMap[strings.ToLower(cat)] = true
+	}
+
+	for _, trait := range traits {
+		if !excludedMap[strings.ToLower(trait)] {
+			// Found a trait that's NOT excluded
+			return false
+		}
+	}
+
+	// All traits are excluded
+	return true
+}
+
+// TestMethodInfo represents a test method with its traits
+type TestMethodInfo struct {
+	Name   string
+	Traits []string // combined class-level + method-level traits
+}
+
+// AreAllTestsExcludedInFile analyzes a C# test file and determines if ALL test methods
+// would be excluded by the given category filter exclusions.
+// This properly handles:
+// - Class-level traits (apply to all methods in the class)
+// - Method-level traits (apply to specific test methods)
+// - Multiple classes in the same file
+// Returns (allExcluded bool, excludedTraits []string, testCount int)
+func AreAllTestsExcludedInFile(content string, excludedCategories []string) (bool, []string, int) {
+	if len(excludedCategories) == 0 {
+		return false, nil, 0
+	}
+
+	// Strip comments to avoid matching commented-out attributes
+	content = stripCSharpComments(content)
+
+	excludedMap := make(map[string]bool)
+	for _, cat := range excludedCategories {
+		excludedMap[strings.ToLower(cat)] = true
+	}
+
+	// Find all classes in the file
+	classMatches := classBlockRegex.FindAllStringSubmatchIndex(content, -1)
+	if len(classMatches) == 0 {
+		return false, nil, 0
+	}
+
+	var allTestMethods []TestMethodInfo
+	var allExcludedTraits []string
+
+	for i, classMatch := range classMatches {
+		// classMatch indices: [fullStart, fullEnd, attrsStart, attrsEnd, nameStart, nameEnd]
+		if len(classMatch) < 6 {
+			continue
+		}
+
+		// Extract class attributes and name
+		classAttrs := ""
+		if classMatch[2] >= 0 && classMatch[3] >= 0 {
+			classAttrs = content[classMatch[2]:classMatch[3]]
+		}
+
+		// Extract class-level traits
+		classTraits := extractTraitsFromAttributes(classAttrs)
+
+		// Find the class body (from class definition to next class or end of file)
+		classStart := classMatch[0]
+		classEnd := len(content)
+		if i+1 < len(classMatches) {
+			classEnd = classMatches[i+1][0]
+		}
+		classBody := content[classStart:classEnd]
+
+		// Find test methods in this class
+		methodMatches := testMethodBlockRegex.FindAllStringSubmatch(classBody, -1)
+		for _, methodMatch := range methodMatches {
+			if len(methodMatch) < 3 {
+				continue
+			}
+
+			methodAttrs := methodMatch[1]
+			methodName := methodMatch[2]
+
+			// Check if this is actually a test method (has test attribute)
+			if !testAttributeRegex.MatchString(methodAttrs) {
+				continue
+			}
+
+			// Extract method-level traits
+			methodTraits := extractTraitsFromAttributes(methodAttrs)
+
+			// Combine class-level and method-level traits
+			combinedTraits := make(map[string]bool)
+			for _, t := range classTraits {
+				combinedTraits[t] = true
+			}
+			for _, t := range methodTraits {
+				combinedTraits[t] = true
+			}
+
+			var traits []string
+			for t := range combinedTraits {
+				traits = append(traits, t)
+			}
+
+			allTestMethods = append(allTestMethods, TestMethodInfo{
+				Name:   methodName,
+				Traits: traits,
+			})
+		}
+	}
+
+	if len(allTestMethods) == 0 {
+		// No test methods found - can't determine, don't exclude
+		return false, nil, 0
+	}
+
+	// Check if ALL test methods have at least one excluded trait
+	for _, method := range allTestMethods {
+		if len(method.Traits) == 0 {
+			// Method has no traits, won't be excluded
+			return false, nil, len(allTestMethods)
+		}
+
+		hasExcludedTrait := false
+		for _, trait := range method.Traits {
+			if excludedMap[strings.ToLower(trait)] {
+				hasExcludedTrait = true
+				allExcludedTraits = append(allExcludedTraits, trait)
+				break
+			}
+		}
+
+		if !hasExcludedTrait {
+			// This method won't be excluded
+			return false, nil, len(allTestMethods)
+		}
+	}
+
+	// All test methods have at least one excluded trait
+	return true, uniqueStrings(allExcludedTraits), len(allTestMethods)
+}
+
+// extractTraitsFromAttributes extracts category traits from an attributes block
+func extractTraitsFromAttributes(attrs string) []string {
+	traitsMap := make(map[string]bool)
+
+	for _, match := range categoryAttrRegex.FindAllStringSubmatch(attrs, -1) {
+		if len(match) >= 2 {
+			traitsMap[match[1]] = true
+		}
+	}
+	for _, match := range traitAttrRegex.FindAllStringSubmatch(attrs, -1) {
+		if len(match) >= 2 {
+			traitsMap[match[1]] = true
+		}
+	}
+	for _, match := range testCategoryAttrRegex.FindAllStringSubmatch(attrs, -1) {
+		if len(match) >= 2 {
+			traitsMap[match[1]] = true
+		}
+	}
+
+	var traits []string
+	for trait := range traitsMap {
+		traits = append(traits, trait)
+	}
+	return traits
+}
 
 // TestHeuristic defines a named heuristic for guessing test names from source files
 type TestHeuristic struct {

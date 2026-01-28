@@ -66,6 +66,33 @@ func versionString() string {
 	return strings.Join(parts, " ")
 }
 
+// shellQuoteArgs returns args formatted for copy-paste into shell
+// Arguments containing special characters are single-quoted
+func shellQuoteArgs(args []string) string {
+	// Characters that need quoting in bash/zsh
+	needsQuoting := func(s string) bool {
+		for _, c := range s {
+			switch c {
+			case ' ', '\t', '\n', '&', '|', ';', '$', '`', '"', '\'', '\\', '<', '>', '(', ')', '{', '}', '[', ']', '*', '?', '!', '#', '~', '=':
+				return true
+			}
+		}
+		return false
+	}
+
+	var parts []string
+	for _, arg := range args {
+		if needsQuoting(arg) {
+			// Use single quotes, escaping any single quotes in the string
+			escaped := strings.ReplaceAll(arg, "'", "'\"'\"'")
+			parts = append(parts, "'"+escaped+"'")
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // Project and Solution are type aliases to the project package types.
 type Project = project.Project
 type Solution = project.Solution
@@ -1079,6 +1106,7 @@ type runResult struct {
 	testClasses    []string // test classes that were run (if filtered)
 	buildOnly      bool     // true if this was a build-only job (no tests)
 	viaSolution    bool     // true if this was run as part of a solution build
+	skippedByFilter bool    // true if all tests were excluded by user's category filter
 }
 
 type statusUpdate struct {
@@ -1287,7 +1315,7 @@ func runSolutionCommand(command string, sln *Solution, projects []*Project, extr
 		)
 	}
 
-	term.Verbose("  dotnet %s", strings.Join(args, " "))
+	term.Verbose("  dotnet %s", shellQuoteArgs(args))
 
 	err := cmd.Run()
 	duration := time.Since(startTime)
@@ -1454,7 +1482,7 @@ func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remai
 					)
 				}
 
-				term.Verbose("  dotnet %s", strings.Join(args, " "))
+				term.Verbose("  dotnet %s", shellQuoteArgs(args))
 				err := cmd.Run()
 
 				slnResults <- slnResult{
@@ -1714,13 +1742,31 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 
 		// Print per-project filters from testFilter (based on changed files)
 		if testFilter != nil {
+			// Extract user filter from extraArgs for checking exclusions
+			var previewUserFilter string
+			for i, arg := range extraArgs {
+				if arg == "--filter" && i+1 < len(extraArgs) {
+					previewUserFilter = extraArgs[i+1]
+					break
+				} else if strings.HasPrefix(arg, "--filter=") {
+					previewUserFilter = strings.TrimPrefix(arg, "--filter=")
+					break
+				}
+			}
+
 			var hasFilters bool
+			var hasSkipped bool
 			for _, p := range projects {
 				if buildOnlyProjects != nil && buildOnlyProjects[p.Path] {
 					continue // skip build-only projects
 				}
-				result := testFilter.GetFilter(p.Path, root)
-				if result.CanFilter {
+				result := testFilter.GetFilter(p.Path, root, previewUserFilter)
+				if result.ExcludedByUserFilter {
+					if !hasSkipped {
+						hasSkipped = true
+					}
+					term.Dim("%s: skipped (all tests excluded by filter: %s)", p.Name, strings.Join(result.ExcludedTraits, ", "))
+				} else if result.CanFilter {
 					if !hasFilters {
 						term.Dim("Filtering tests based on changed files:")
 						hasFilters = true
@@ -1732,7 +1778,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					}
 				}
 			}
-			if hasFilters {
+			if hasFilters || hasSkipped {
 				term.Println()
 			}
 		}
@@ -1854,34 +1900,42 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				var testClasses []string
 				var argsBeforeOurFilter []string // Save args before adding our filter for retry
 				var userFilter string            // User's original --filter value
+				var skipTestsDueToUserFilter bool // True if all tests would be excluded by user filter
+
+				// Extract user filter first (needed for GetFilter to check exclusions)
+				existingFilterIdx := -1
+				for i, arg := range extraArgs {
+					if arg == "--filter" && i+1 < len(extraArgs) {
+						existingFilterIdx = i + 1
+						break
+					} else if strings.HasPrefix(arg, "--filter=") {
+						existingFilterIdx = i
+						break
+					}
+				}
+				if existingFilterIdx >= 0 {
+					if strings.HasPrefix(extraArgs[existingFilterIdx], "--filter=") {
+						userFilter = strings.TrimPrefix(extraArgs[existingFilterIdx], "--filter=")
+					} else {
+						userFilter = extraArgs[existingFilterIdx]
+					}
+				}
+
 				if projectCommand == "test" && testFilter != nil {
-					filterResult := testFilter.GetFilter(p.Path, root)
-					if filterResult.CanFilter {
+					filterResult := testFilter.GetFilter(p.Path, root, userFilter)
+
+					// Check if all tests would be excluded by user's category filter
+					if filterResult.ExcludedByUserFilter {
+						skipTestsDueToUserFilter = true
+						term.Verbose("  [%s] skipping: %s", p.Name, filterResult.Reason)
+					} else if filterResult.CanFilter {
 						// Save args before adding filter (for retry if no tests match)
 						argsBeforeOurFilter = make([]string, len(args))
 						copy(argsBeforeOurFilter, args)
 
-						// Check if user already has a --filter arg - if so, combine with AND
-						existingFilterIdx := -1
-						for i, arg := range extraArgs {
-							if arg == "--filter" && i+1 < len(extraArgs) {
-								existingFilterIdx = i + 1
-								break
-							} else if strings.HasPrefix(arg, "--filter=") {
-								existingFilterIdx = i
-								break
-							}
-						}
 						if existingFilterIdx >= 0 {
 							// Combine filters: (our filter) & (user filter)
-							var existingFilter string
-							if strings.HasPrefix(extraArgs[existingFilterIdx], "--filter=") {
-								existingFilter = strings.TrimPrefix(extraArgs[existingFilterIdx], "--filter=")
-							} else {
-								existingFilter = extraArgs[existingFilterIdx]
-							}
-							userFilter = existingFilter
-							combinedFilter := fmt.Sprintf("(%s)&(%s)", filterResult.TestFilter, existingFilter)
+							combinedFilter := fmt.Sprintf("(%s)&(%s)", filterResult.TestFilter, userFilter)
 							args = append(args, "--filter", combinedFilter)
 							filteredTests = true
 							testClasses = filterResult.TestClasses
@@ -1902,6 +1956,13 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					} else {
 						term.Verbose("  [%s] running all tests: %s", p.Name, filterResult.Reason)
 					}
+				}
+
+				// Skip this project if all tests would be excluded by user filter
+				if skipTestsDueToUserFilter {
+					term.Verbose("  [%s] skipping (all tests excluded by filter)", p.Name)
+					results <- runResult{project: p, success: true, output: "skipped: all tests excluded by user filter", skippedByFilter: true}
+					continue
 				}
 
 				// Apply failed test filters (from --failed flag)
@@ -1953,7 +2014,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					)
 				}
 
-				term.Verbose("  [%s] dotnet %s", p.Name, strings.Join(args, " "))
+				term.Verbose("  [%s] dotnet %s", p.Name, shellQuoteArgs(args))
 
 				err := cmd.Run()
 				duration := time.Since(projectStart)
@@ -1988,9 +2049,15 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					skippedRestore = false // We did restore this time
 				}
 
-				// Check if our test filter resulted in 0 matching tests - retry with just user filter
-				if filteredTests && strings.Contains(outputStr, "No test matches the given testcase filter") {
-					term.Warnf("  [%s] heuristic filter matched 0 tests, retrying without it", p.Name)
+				// Check if our test filter resulted in 0 matching tests or had invalid format - retry with just user filter
+				filterError := strings.Contains(outputStr, "No test matches the given testcase filter")
+				filterFormatError := strings.Contains(outputStr, "Incorrect format for TestCaseFilter")
+				if filteredTests && (filterError || filterFormatError) {
+					if filterFormatError {
+						term.Warnf("  [%s] filter format error, retrying without our filter", p.Name)
+					} else {
+						term.Warnf("  [%s] heuristic filter matched 0 tests, retrying without it", p.Name)
+					}
 					term.Verbose("    tried: %s", strings.Join(testClasses, ", "))
 
 					// List actual test names to help debug why filter didn't match (verbose only)
@@ -2039,7 +2106,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					retryCmd.Dir = root
 					retryCmd.Env = cmd.Env
 
-					term.Verbose("  [%s] dotnet %s", p.Name, strings.Join(retryArgs, " "))
+					term.Verbose("  [%s] dotnet %s", p.Name, shellQuoteArgs(retryArgs))
 
 					err = retryCmd.Run()
 					duration = time.Since(projectStart)
@@ -2163,11 +2230,14 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 			allResults = append(allResults, r)
 			if *flagQuiet {
 				// In quiet mode, skip progress output but still mark cache
-				now := time.Now()
-				relevantDirs := project.GetRelevantDirs(r.project, forwardGraph)
-				contentHash := computeContentHash(root, relevantDirs)
-				key := cache.MakeKey(contentHash, argsHash, r.project.Path)
-				db.Mark(key, now, r.success, []byte(r.output), argsForCache)
+				// (unless skipped by filter - nothing was run)
+				if !r.skippedByFilter {
+					now := time.Now()
+					relevantDirs := project.GetRelevantDirs(r.project, forwardGraph)
+					contentHash := computeContentHash(root, relevantDirs)
+					key := cache.MakeKey(contentHash, argsHash, r.project.Path)
+					db.Mark(key, now, r.success, []byte(r.output), argsForCache)
+				}
 				if r.success {
 					succeeded++
 				} else {
@@ -2186,6 +2256,26 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 				continue
 			}
 			clearStatus()
+
+			// Handle projects skipped due to user filter (all tests excluded)
+			if r.skippedByFilter {
+				succeeded++
+				testSucceeded++
+				// Don't print result line - the preview already showed it will be skipped
+				// Don't mark cache - nothing was actually run
+				// Unblock dependent projects
+				for path, p := range pending {
+					delete(pendingDeps[path], r.project.Path)
+					if len(pendingDeps[path]) == 0 {
+						delete(pending, path)
+						jobs <- p
+						jobsSent++
+					}
+				}
+				closeJobsIfDone()
+				continue
+			}
+
 			skipIndicator := term.SkipIndicator(r.skippedBuild, r.skippedRestore)
 
 			// Pad project name and duration for alignment

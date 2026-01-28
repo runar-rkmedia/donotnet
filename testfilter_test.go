@@ -31,7 +31,7 @@ func TestGetFilterWithCoverage(t *testing.T) {
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Service.cs")
 
 	// Get filter
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true, got false. Reason: %s", result.Reason)
@@ -66,7 +66,7 @@ func TestGetFilterWithCoverage_UncoveredFile(t *testing.T) {
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/NewFile.cs")
 
 	// Get filter - with only TestFileOnly heuristic, non-test files can't filter
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	if result.CanFilter {
 		t.Errorf("expected CanFilter=false for uncovered non-test file, got true")
@@ -93,7 +93,7 @@ func TestGetFilterWithCoverage_UncoveredFile_WithHeuristics(t *testing.T) {
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/NewFile.cs")
 
 	// Get filter - should use heuristics (NewFile.cs -> NewFileTests)
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true with NameToNameTests heuristic, got false. Reason: %s", result.Reason)
@@ -118,7 +118,7 @@ func TestGetFilterWithCoverage_NoCoverageMap(t *testing.T) {
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Service.cs")
 
 	// Get filter - with only TestFileOnly heuristic, non-test files can't filter
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	if result.CanFilter {
 		t.Errorf("expected CanFilter=false for non-test file with default heuristics, got true")
@@ -134,7 +134,7 @@ func TestGetFilterWithCoverage_NoCoverageMap_WithHeuristics(t *testing.T) {
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Service.cs")
 
 	// Get filter - should use heuristics (Service.cs -> ServiceTests)
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true with NameToNameTests heuristic, got false. Reason: %s", result.Reason)
@@ -159,7 +159,7 @@ func TestGetFilterWithCoverage_TestFileOnly(t *testing.T) {
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "tests/MyLib.Tests/ServiceTests.cs")
 
 	// Get filter
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true for test file change, got false. Reason: %s", result.Reason)
@@ -250,7 +250,7 @@ func TestHeuristic_ExtensionsToBase(t *testing.T) {
 
 	tf.AddChangedFile("project", "src/Lib/FooExtensions.cs")
 
-	result := tf.GetFilter("project", "/tmp/gitroot")
+	result := tf.GetFilter("project", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true, got false. Reason: %s", result.Reason)
@@ -266,7 +266,7 @@ func TestHeuristic_InterfaceToImpl(t *testing.T) {
 
 	tf.AddChangedFile("project", "src/Lib/IUserService.cs")
 
-	result := tf.GetFilter("project", "/tmp/gitroot")
+	result := tf.GetFilter("project", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true, got false. Reason: %s", result.Reason)
@@ -282,7 +282,7 @@ func TestHeuristic_AlwaysCompositionRoot(t *testing.T) {
 
 	tf.AddChangedFile("project", "src/Lib/AnyFile.cs")
 
-	result := tf.GetFilter("project", "/tmp/gitroot")
+	result := tf.GetFilter("project", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true, got false. Reason: %s", result.Reason)
@@ -298,7 +298,7 @@ func TestGetFilterWithHeuristics_Disabled(t *testing.T) {
 
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Service.cs")
 
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	// With heuristics disabled and no coverage, should fdefault back to "can't filter"
 	if result.CanFilter {
@@ -320,7 +320,7 @@ func TestGetFilterWithHeuristics_DirectoryNamespace(t *testing.T) {
 	// Add a file in a subdirectory
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Cache/CacheManager.cs")
 
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true, got false. Reason: %s", result.Reason)
@@ -356,7 +356,7 @@ func TestGetFilterWithCoverage_MixedChanges(t *testing.T) {
 	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "tests/MyLib.Tests/OtherTests.cs")
 
 	// Get filter
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot")
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
 
 	if !result.CanFilter {
 		t.Errorf("expected CanFilter=true for mixed changes with coverage, got false. Reason: %s", result.Reason)
@@ -550,5 +550,345 @@ func TestParseCoverageGranularity(t *testing.T) {
 		if result != tc.expected {
 			t.Errorf("ParseCoverageGranularity(%q) = %v, expected %v", tc.input, result, tc.expected)
 		}
+	}
+}
+
+func TestExtractCategoryTraitsFromContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected []string
+	}{
+		{
+			name: "NUnit Category",
+			content: `
+[Category("Live")]
+public class LiveTests {
+    [Test]
+    public void TestSomething() { }
+}`,
+			expected: []string{"Live"},
+		},
+		{
+			name: "Commented out category - should not match",
+			content: `
+// [Category("Live")]
+public class RegularTests {
+    [Test]
+    public void TestSomething() { }
+}`,
+			expected: nil,
+		},
+		{
+			name: "Commented trait on same line - should not match",
+			content: `
+public class RegularTests {
+    // [Trait("Category", "Live")]
+    [Fact]
+    public void TestSomething() { }
+}`,
+			expected: nil,
+		},
+		{
+			name: "Mixed commented and uncommented traits",
+			content: `
+[Category("Active")]
+// [Category("Live")]
+public class MixedTests {
+    [Test]
+    public void TestSomething() { }
+}`,
+			expected: []string{"Active"},
+		},
+		{
+			name: "xUnit Trait",
+			content: `
+[Trait("Category", "Integration")]
+public class IntegrationTests {
+    [Fact]
+    public void TestSomething() { }
+}`,
+			expected: []string{"Integration"},
+		},
+		{
+			name: "MSTest TestCategory",
+			content: `
+[TestCategory("Slow")]
+public class SlowTests {
+    [TestMethod]
+    public void TestSomething() { }
+}`,
+			expected: []string{"Slow"},
+		},
+		{
+			name: "Multiple categories",
+			content: `
+[Category("Live")]
+[Category("Integration")]
+public class LiveIntegrationTests {
+    [Test]
+    public void TestSomething() { }
+}`,
+			expected: []string{"Live", "Integration"},
+		},
+		{
+			name:     "No categories",
+			content:  `public class RegularTests { }`,
+			expected: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ExtractCategoryTraitsFromContent(tc.content)
+			if len(result) != len(tc.expected) {
+				t.Errorf("expected %d traits, got %d: %v", len(tc.expected), len(result), result)
+				return
+			}
+			// Check all expected traits are present
+			for _, exp := range tc.expected {
+				found := false
+				for _, got := range result {
+					if got == exp {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected trait %q not found in %v", exp, result)
+				}
+			}
+		})
+	}
+}
+
+func TestParseFilterExclusions(t *testing.T) {
+	tests := []struct {
+		filter   string
+		expected []string
+	}{
+		{"Category!=Live", []string{"Live"}},
+		{"Category != Live", []string{"Live"}},
+		{"Category!=Live&Category!=Slow", []string{"Live", "Slow"}},
+		{"FullyQualifiedName~Foo&Category!=Integration", []string{"Integration"}},
+		{"FullyQualifiedName~Foo", nil}, // no exclusions
+		{"", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.filter, func(t *testing.T) {
+			result := ParseFilterExclusions(tc.filter)
+			if len(result) != len(tc.expected) {
+				t.Errorf("ParseFilterExclusions(%q) = %v, expected %v", tc.filter, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestAreAllTraitsExcluded(t *testing.T) {
+	tests := []struct {
+		name       string
+		traits     []string
+		excluded   []string
+		shouldSkip bool
+	}{
+		{"all excluded", []string{"Live"}, []string{"Live"}, true},
+		{"all excluded multiple", []string{"Live", "Slow"}, []string{"Live", "Slow", "Integration"}, true},
+		{"some not excluded", []string{"Live", "Fast"}, []string{"Live"}, false},
+		{"no traits", []string{}, []string{"Live"}, false},
+		{"no exclusions", []string{"Live"}, []string{}, false},
+		{"case insensitive", []string{"live"}, []string{"Live"}, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := AreAllTraitsExcluded(tc.traits, tc.excluded)
+			if result != tc.shouldSkip {
+				t.Errorf("AreAllTraitsExcluded(%v, %v) = %v, expected %v", tc.traits, tc.excluded, result, tc.shouldSkip)
+			}
+		})
+	}
+}
+
+func TestAreAllTestsExcludedInFile(t *testing.T) {
+	tests := []struct {
+		name              string
+		content           string
+		excludedCategories []string
+		expectExcluded    bool
+		expectTestCount   int
+	}{
+		{
+			name: "class-level trait excludes all methods",
+			content: `
+[Category("Live")]
+public class LiveTests {
+    [Test]
+    public void TestA() { }
+
+    [Test]
+    public void TestB() { }
+}`,
+			excludedCategories: []string{"Live"},
+			expectExcluded:     true,
+			expectTestCount:    2,
+		},
+		{
+			name: "method-level trait only on some methods - not all excluded",
+			content: `
+public class MixedTests {
+    [Category("Live")]
+    [Test]
+    public void LiveTest() { }
+
+    [Test]
+    public void RegularTest() { }
+}`,
+			excludedCategories: []string{"Live"},
+			expectExcluded:     false,
+			expectTestCount:    2,
+		},
+		{
+			name: "all methods have excluded trait at method level",
+			content: `
+public class AllLiveTests {
+    [Category("Live")]
+    [Test]
+    public void TestA() { }
+
+    [Category("Live")]
+    [Test]
+    public void TestB() { }
+}`,
+			excludedCategories: []string{"Live"},
+			expectExcluded:     true,
+			expectTestCount:    2,
+		},
+		{
+			name: "class trait combined with method trait - one method has extra non-excluded trait",
+			content: `
+[Category("Live")]
+public class LiveTests {
+    [Test]
+    public void TestA() { }
+
+    [Category("Fast")]
+    [Test]
+    public void TestB() { }
+}`,
+			excludedCategories: []string{"Live"},
+			// Both methods inherit "Live" from class, so both are excluded
+			expectExcluded:  true,
+			expectTestCount: 2,
+		},
+		{
+			name: "multiple classes - one has excluded trait, one doesn't",
+			content: `
+[Category("Live")]
+public class LiveTests {
+    [Test]
+    public void TestLive() { }
+}
+
+public class RegularTests {
+    [Test]
+    public void TestRegular() { }
+}`,
+			excludedCategories: []string{"Live"},
+			expectExcluded:     false,
+			expectTestCount:    2,
+		},
+		{
+			name: "multiple classes - all have excluded trait",
+			content: `
+[Category("Live")]
+public class LiveTests1 {
+    [Test]
+    public void Test1() { }
+}
+
+[Category("Live")]
+public class LiveTests2 {
+    [Test]
+    public void Test2() { }
+}`,
+			excludedCategories: []string{"Live"},
+			expectExcluded:     true,
+			expectTestCount:    2,
+		},
+		{
+			name: "no test methods",
+			content: `
+[Category("Live")]
+public class LiveHelpers {
+    public void Setup() { }
+}`,
+			excludedCategories: []string{"Live"},
+			expectExcluded:     false,
+			expectTestCount:    0,
+		},
+		{
+			name: "xUnit style trait",
+			content: `
+[Trait("Category", "Integration")]
+public class IntegrationTests {
+    [Fact]
+    public void TestA() { }
+}`,
+			excludedCategories: []string{"Integration"},
+			expectExcluded:     true,
+			expectTestCount:    1,
+		},
+		{
+			name: "MSTest style category",
+			content: `
+[TestCategory("Slow")]
+public class SlowTests {
+    [TestMethod]
+    public void TestA() { }
+}`,
+			excludedCategories: []string{"Slow"},
+			expectExcluded:     true,
+			expectTestCount:    1,
+		},
+		{
+			name: "no category attributes at all",
+			content: `
+public class RegularTests {
+    [Test]
+    public void TestA() { }
+}`,
+			excludedCategories: []string{"Live"},
+			expectExcluded:     false,
+			expectTestCount:    1,
+		},
+		{
+			name: "method without trait in class with trait",
+			content: `
+[Category("Live")]
+public class LiveTests {
+    [Test]
+    public void TestInheritsLive() { }
+}`,
+			excludedCategories: []string{"Live"},
+			// The test method inherits Live from the class
+			expectExcluded:  true,
+			expectTestCount: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			excluded, traits, testCount := AreAllTestsExcludedInFile(tc.content, tc.excludedCategories)
+
+			if excluded != tc.expectExcluded {
+				t.Errorf("expected excluded=%v, got %v (traits=%v, testCount=%d)",
+					tc.expectExcluded, excluded, traits, testCount)
+			}
+
+			if testCount != tc.expectTestCount {
+				t.Errorf("expected testCount=%d, got %d", tc.expectTestCount, testCount)
+			}
+		})
 	}
 }
