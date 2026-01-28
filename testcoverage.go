@@ -90,11 +90,17 @@ func parseTestListOutput(output string) []string {
 	return tests
 }
 
+// TestDetail represents a single test with its traits
+type TestDetail struct {
+	Name   string   `json:"name"`
+	Traits []string `json:"traits,omitempty"`
+}
+
 // TestInfo represents test information for JSON output
 type TestInfo struct {
-	Project string   `json:"project"`
-	Tests   []string `json:"tests"`
-	Count   int      `json:"count"`
+	Project string       `json:"project"`
+	Tests   []TestDetail `json:"tests"`
+	Count   int          `json:"count"`
 }
 
 // TestCoverageMap maps source files to the tests that cover them
@@ -512,6 +518,159 @@ type testFileInfo struct {
 	path      string   // relative path to the test file
 	namespace string   // namespace declared in the file
 	classes   []string // class names declared in the file
+}
+
+// testTraitInfo holds trait information for tests in a project
+type testTraitInfo struct {
+	// classTraits maps fully qualified class name to its traits
+	classTraits map[string][]string
+	// methodTraits maps fully qualified method name to its traits
+	methodTraits map[string][]string
+}
+
+// buildTestTraitMap scans test files and extracts traits for classes and methods
+func buildTestTraitMap(projectDir string) *testTraitInfo {
+	info := &testTraitInfo{
+		classTraits:  make(map[string][]string),
+		methodTraits: make(map[string][]string),
+	}
+
+	// Regex patterns for parsing
+	namespaceRegex := regexp.MustCompile(`(?m)^\s*namespace\s+([\w.]+)`)
+	// Class with attributes - captures attributes block and class name
+	classWithAttrsRegex := regexp.MustCompile(`(?ms)((?:\[[^\]]+\]\s*)*)\s*(?:public\s+|internal\s+|private\s+|protected\s+)*(?:abstract\s+|sealed\s+|static\s+|partial\s+)*class\s+(\w+)`)
+	// Test method with attributes
+	methodWithAttrsRegex := regexp.MustCompile(`(?ms)((?:\[[^\]]+\]\s*)+)\s*(?:public\s+|private\s+|protected\s+|internal\s+)?(?:async\s+)?(?:Task|void|\w+)\s+(\w+)\s*\(`)
+
+	filepath.Walk(projectDir, func(path string, fileInfo os.FileInfo, err error) error {
+		if err != nil || fileInfo.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".cs") {
+			return nil
+		}
+		// Skip generated files
+		if strings.Contains(path, "/obj/") || strings.Contains(path, "\\obj\\") {
+			return nil
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		// Strip comments to avoid matching commented-out attributes
+		contentStr := stripCSharpComments(string(content))
+
+		// Extract namespace
+		var namespace string
+		if m := namespaceRegex.FindStringSubmatch(contentStr); m != nil {
+			namespace = m[1]
+		}
+
+		// Find all classes and their traits
+		classMatches := classWithAttrsRegex.FindAllStringSubmatchIndex(contentStr, -1)
+		for i, match := range classMatches {
+			if len(match) < 6 {
+				continue
+			}
+
+			// Extract class attributes and name
+			classAttrs := ""
+			if match[2] >= 0 && match[3] >= 0 {
+				classAttrs = contentStr[match[2]:match[3]]
+			}
+			className := contentStr[match[4]:match[5]]
+
+			// Build fully qualified class name
+			var fqClassName string
+			if namespace != "" {
+				fqClassName = namespace + "." + className
+			} else {
+				fqClassName = className
+			}
+
+			// Extract class-level traits
+			classTraits := extractTraitsFromAttributes(classAttrs)
+			if len(classTraits) > 0 {
+				info.classTraits[fqClassName] = classTraits
+			}
+
+			// Find class body (from class definition to next class or end)
+			classStart := match[0]
+			classEnd := len(contentStr)
+			if i+1 < len(classMatches) {
+				classEnd = classMatches[i+1][0]
+			}
+			classBody := contentStr[classStart:classEnd]
+
+			// Find test methods in this class
+			methodMatches := methodWithAttrsRegex.FindAllStringSubmatch(classBody, -1)
+			for _, methodMatch := range methodMatches {
+				if len(methodMatch) < 3 {
+					continue
+				}
+
+				methodAttrs := methodMatch[1]
+				methodName := methodMatch[2]
+
+				// Check if this is actually a test method
+				if !testAttributeRegex.MatchString(methodAttrs) {
+					continue
+				}
+
+				// Extract method-level traits
+				methodTraits := extractTraitsFromAttributes(methodAttrs)
+				if len(methodTraits) > 0 {
+					fqMethodName := fqClassName + "." + methodName
+					info.methodTraits[fqMethodName] = methodTraits
+				}
+			}
+		}
+		return nil
+	})
+
+	return info
+}
+
+// getTraitsForTest returns the traits for a specific test
+// Combines class-level and method-level traits
+func (info *testTraitInfo) getTraitsForTest(testName string) []string {
+	// Strip parameters from test name
+	baseName := testName
+	if idx := strings.Index(testName, "("); idx > 0 {
+		baseName = testName[:idx]
+	}
+
+	// Get class name (everything before the last dot)
+	className := getTestClassName(baseName)
+
+	traitsMap := make(map[string]bool)
+
+	// Add class-level traits
+	if traits, ok := info.classTraits[className]; ok {
+		for _, t := range traits {
+			traitsMap[t] = true
+		}
+	}
+
+	// Add method-level traits
+	if traits, ok := info.methodTraits[baseName]; ok {
+		for _, t := range traits {
+			traitsMap[t] = true
+		}
+	}
+
+	if len(traitsMap) == 0 {
+		return nil
+	}
+
+	var result []string
+	for t := range traitsMap {
+		result = append(result, t)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // scanTestFiles scans .cs files in a directory and extracts namespace and class info
@@ -972,6 +1131,17 @@ func listTestCoverageGroupings(db *cache.DB, gitRoot string, projects []*Project
 			continue
 		}
 
+		// Build trait map for this project
+		traitInfo := buildTestTraitMap(projectDir)
+
+		// Collect all traits used in this project
+		allTraits := make(map[string]int)
+		for _, t := range tests {
+			for _, trait := range traitInfo.getTraitsForTest(t) {
+				allTraits[trait]++
+			}
+		}
+
 		// Deduplicate (strip parameters)
 		seenBase := make(map[string]bool)
 		var uniqueTests []string
@@ -987,6 +1157,17 @@ func listTestCoverageGroupings(db *cache.DB, gitRoot string, projects []*Project
 		}
 
 		term.Printf("  Total: %d tests (%d unique)\n", len(tests), len(uniqueTests))
+
+		// Show traits summary if any exist
+		if len(allTraits) > 0 {
+			var traitStrs []string
+			for trait, count := range allTraits {
+				traitStrs = append(traitStrs, fmt.Sprintf("%s(%d)", trait, count))
+			}
+			sort.Strings(traitStrs)
+			term.Printf("  Traits: %s%s%s\n",
+				term.Color(term.ColorYellow), strings.Join(traitStrs, ", "), term.Color(term.ColorReset))
+		}
 		term.Println()
 
 		// Method granularity
@@ -999,11 +1180,29 @@ func listTestCoverageGroupings(db *cache.DB, gitRoot string, projects []*Project
 		term.Printf("  %sclass%s:  %d groups (%.1fx reduction)\n",
 			term.Color(term.ColorGreen), term.Color(term.ColorReset), len(classGroups), classReduction)
 
-		// Show class groups
+		// Show class groups with traits
 		for _, g := range classGroups {
-			if len(g.tests) > 1 {
-				term.Printf("    %s%s%s: %d tests\n",
-					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests))
+			// Collect traits for this group
+			groupTraits := make(map[string]bool)
+			for _, t := range g.tests {
+				for _, trait := range traitInfo.getTraitsForTest(t) {
+					groupTraits[trait] = true
+				}
+			}
+
+			traitStr := ""
+			if len(groupTraits) > 0 {
+				var traits []string
+				for t := range groupTraits {
+					traits = append(traits, t)
+				}
+				sort.Strings(traits)
+				traitStr = fmt.Sprintf(" %s[%s]%s", term.Color(term.ColorYellow), strings.Join(traits, ","), term.Color(term.ColorReset))
+			}
+
+			if len(g.tests) > 1 || len(groupTraits) > 0 {
+				term.Printf("    %s%s%s: %d tests%s\n",
+					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests), traitStr)
 			}
 		}
 
@@ -1014,11 +1213,29 @@ func listTestCoverageGroupings(db *cache.DB, gitRoot string, projects []*Project
 		term.Printf("  %sfile%s:   %d groups (%.1fx reduction)\n",
 			term.Color(term.ColorCyan), term.Color(term.ColorReset), len(fileGroups), fileReduction)
 
-		// Show file groups
+		// Show file groups with traits
 		for _, g := range fileGroups {
-			if len(g.tests) > 1 {
-				term.Printf("    %s%s%s: %d tests\n",
-					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests))
+			// Collect traits for this group
+			groupTraits := make(map[string]bool)
+			for _, t := range g.tests {
+				for _, trait := range traitInfo.getTraitsForTest(t) {
+					groupTraits[trait] = true
+				}
+			}
+
+			traitStr := ""
+			if len(groupTraits) > 0 {
+				var traits []string
+				for t := range groupTraits {
+					traits = append(traits, t)
+				}
+				sort.Strings(traits)
+				traitStr = fmt.Sprintf(" %s[%s]%s", term.Color(term.ColorYellow), strings.Join(traits, ","), term.Color(term.ColorReset))
+			}
+
+			if len(g.tests) > 1 || len(groupTraits) > 0 {
+				term.Printf("    %s%s%s: %d tests%s\n",
+					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests), traitStr)
 			}
 		}
 
@@ -1206,16 +1423,32 @@ func listAllTests(db *cache.DB, gitRoot string, projects []*Project, forwardGrap
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
+				absProjectPath := filepath.Join(gitRoot, p.Path)
+				projectDir := filepath.Dir(absProjectPath)
+
 				testList, err := getTestList(db, gitRoot, p, forwardGraph)
 				if err != nil {
 					term.Verbose("  [%s] failed to list tests: %v", p.Name, err)
 					continue
 				}
 
+				// Build trait map for this project
+				traitInfo := buildTestTraitMap(projectDir)
+
+				// Build test details with traits
+				var testDetails []TestDetail
+				for _, testName := range testList.Tests {
+					traits := traitInfo.getTraitsForTest(testName)
+					testDetails = append(testDetails, TestDetail{
+						Name:   testName,
+						Traits: traits,
+					})
+				}
+
 				mu.Lock()
 				results = append(results, TestInfo{
 					Project: p.Name,
-					Tests:   testList.Tests,
+					Tests:   testDetails,
 					Count:   len(testList.Tests),
 				})
 				mu.Unlock()
