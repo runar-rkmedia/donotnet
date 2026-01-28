@@ -5,10 +5,46 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	goterm "golang.org/x/term"
 )
+
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// StripAnsi removes ANSI escape codes from a string
+func StripAnsi(s string) string {
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// ShellQuoteArgs returns args formatted for copy-paste into shell
+// Arguments containing special characters are single-quoted
+func ShellQuoteArgs(args []string) string {
+	// Characters that need quoting in bash/zsh
+	needsQuoting := func(s string) bool {
+		for _, c := range s {
+			switch c {
+			case ' ', '\t', '\n', '&', '|', ';', '$', '`', '"', '\'', '\\', '<', '>', '(', ')', '{', '}', '[', ']', '*', '?', '!', '#', '~', '=':
+				return true
+			}
+		}
+		return false
+	}
+
+	var parts []string
+	for _, arg := range args {
+		if needsQuoting(arg) {
+			// Use single quotes, escaping any single quotes in the string
+			escaped := strings.ReplaceAll(arg, "'", "'\"'\"'")
+			parts = append(parts, "'"+escaped+"'")
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+	return strings.Join(parts, " ")
+}
 
 // ANSI color codes
 const (

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,11 +10,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"runtime/debug"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,70 +24,6 @@ import (
 	"github.com/runar-rkmedia/donotnet/term"
 	"github.com/runar-rkmedia/donotnet/testresults"
 )
-
-func getBuildInfo() (version, vcsRevision, vcsTime, vcsModified string) {
-	version = "dev"
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return
-	}
-	if info.Main.Version != "" && info.Main.Version != "(devel)" {
-		version = info.Main.Version
-	}
-	for _, s := range info.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			vcsRevision = s.Value[:min(7, len(s.Value))]
-		case "vcs.time":
-			vcsTime = s.Value
-		case "vcs.modified":
-			vcsModified = s.Value
-		}
-	}
-	return
-}
-
-func versionString() string {
-	version, rev, vcsTime, modified := getBuildInfo()
-	parts := []string{"donotnet", version}
-	if rev != "" {
-		parts = append(parts, rev)
-	}
-	if modified == "true" {
-		parts = append(parts, "(modified)")
-	}
-	if vcsTime != "" {
-		parts = append(parts, "built", vcsTime)
-	}
-	return strings.Join(parts, " ")
-}
-
-// shellQuoteArgs returns args formatted for copy-paste into shell
-// Arguments containing special characters are single-quoted
-func shellQuoteArgs(args []string) string {
-	// Characters that need quoting in bash/zsh
-	needsQuoting := func(s string) bool {
-		for _, c := range s {
-			switch c {
-			case ' ', '\t', '\n', '&', '|', ';', '$', '`', '"', '\'', '\\', '<', '>', '(', ')', '{', '}', '[', ']', '*', '?', '!', '#', '~', '=':
-				return true
-			}
-		}
-		return false
-	}
-
-	var parts []string
-	for _, arg := range args {
-		if needsQuoting(arg) {
-			// Use single quotes, escaping any single quotes in the string
-			escaped := strings.ReplaceAll(arg, "'", "'\"'\"'")
-			parts = append(parts, "'"+escaped+"'")
-		} else {
-			parts = append(parts, arg)
-		}
-	}
-	return strings.Join(parts, " ")
-}
 
 // Project and Solution are type aliases to the project package types.
 type Project = project.Project
@@ -982,273 +914,6 @@ func main() {
 	}
 }
 
-func findChangedProjects(db *cache.DB, projects []*Project, root string, argsHash string, forwardGraph map[string][]string, vcsChangedFiles []string, useVcsFilter bool) map[string]bool {
-	changed := make(map[string]bool)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	for _, p := range projects {
-		wg.Add(1)
-		go func(p *Project) {
-			defer wg.Done()
-
-			// If using VCS filter, first check if this project has VCS changes
-			if useVcsFilter {
-				relevantDirs := project.GetRelevantDirs(p, forwardGraph)
-				projectVcsFiles := project.FilterFilesToProject(vcsChangedFiles, relevantDirs)
-				if len(projectVcsFiles) == 0 {
-					// No VCS changes for this project, skip entirely
-					return
-				}
-				term.Verbose("  vcs candidate: %s (%d files)", p.Name, len(projectVcsFiles))
-				// Fall through to cache check
-			}
-
-			if projectChanged(db, p, root, argsHash, forwardGraph) {
-				mu.Lock()
-				changed[p.Path] = true
-				mu.Unlock()
-			}
-		}(p)
-	}
-
-	wg.Wait()
-	return changed
-}
-
-func projectChanged(db *cache.DB, p *Project, root string, argsHash string, forwardGraph map[string][]string) bool {
-	// Get relevant directories for this project
-	relevantDirs := project.GetRelevantDirs(p, forwardGraph)
-
-	// Compute content hash for this project and its dependencies
-	contentHash := computeContentHash(root, relevantDirs)
-
-	// Build cache key
-	key := cache.MakeKey(contentHash, argsHash, p.Path)
-
-	// Skip cache check if force flag is set
-	if *flagForce {
-		term.Verbose("  forced: %s (key=%s)", p.Name, key)
-		return true
-	}
-
-	// Check cache
-	if result := db.Lookup(key); result != nil {
-		// If --print-output is set, require cached output to exist (only for test projects)
-		if *flagPrintOutput && p.IsTest && len(result.Output) == 0 {
-			term.Verbose("  cache miss (no output): %s (key=%s)", p.Name, key)
-			return true // Treat as changed - need to re-run to capture output
-		}
-		term.Verbose("  cache hit: %s (key=%s)", p.Name, key)
-		return false // Not changed - cache hit
-	}
-
-	term.Verbose("  cache miss: %s (key=%s)", p.Name, key)
-	return true // Changed - no cache entry
-}
-
-// shouldAutoQuiet returns true if the dotnet args indicate an informational command
-// where the user cares about the output, not the progress
-func shouldAutoQuiet(args []string) bool {
-	infoArgs := map[string]bool{
-		"--list-tests": true, // list available tests
-		"--version":    true, // show version
-		"--help":       true, // show help
-		"-h":           true, // show help (short)
-		"-?":           true, // show help (alt)
-	}
-	for _, arg := range args {
-		if infoArgs[arg] {
-			return true
-		}
-	}
-	return false
-}
-
-func hashArgs(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	h := sha256.Sum256([]byte(strings.Join(args, "\x00")))
-	return fmt.Sprintf("%x", h[:8])
-}
-
-// filterBuildArgs removes test-specific arguments that shouldn't be passed to dotnet build
-func filterBuildArgs(args []string) []string {
-	var filtered []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		// Skip --filter and its value
-		if arg == "--filter" {
-			i++ // skip the next arg (the filter value)
-			continue
-		}
-		if strings.HasPrefix(arg, "--filter=") {
-			continue
-		}
-		// Skip --blame flags (test-specific)
-		if arg == "--blame" || arg == "--blame-hang" || arg == "--blame-crash" {
-			continue
-		}
-		filtered = append(filtered, arg)
-	}
-	return filtered
-}
-
-type runResult struct {
-	project        *Project
-	success        bool
-	output         string
-	duration       time.Duration
-	skippedBuild   bool
-	skippedRestore bool
-	filteredTests  bool     // true if only specific tests were run
-	testClasses    []string // test classes that were run (if filtered)
-	buildOnly      bool     // true if this was a build-only job (no tests)
-	viaSolution    bool     // true if this was run as part of a solution build
-	skippedByFilter bool    // true if all tests were excluded by user's category filter
-}
-
-type statusUpdate struct {
-	project *Project
-	line    string
-}
-
-type statusLineWriter struct {
-	project    *Project
-	status     chan<- statusUpdate
-	buffer     *bytes.Buffer
-	lineBuf    []byte
-	onFailure  func() // Called once when failure detected
-	directMode bool
-	mu         sync.Mutex
-}
-
-var failurePatterns = []string{
-	"Failed!",        // Test run failed
-	"] Failed ",      // Individual test failed
-	"Error Message:", // Test error details
-	"Build FAILED",   // MSBuild failure
-}
-
-var failureRegex = regexp.MustCompile(`Failed:\s*[1-9]\d*[,\s]`) // "Failed: N," where N > 0
-
-// Regex to extract test stats: "Failed: X, Passed: Y, Skipped: Z, Total: N"
-var testStatsRegex = regexp.MustCompile(`Failed:\s*(\d+),\s*Passed:\s*(\d+),\s*Skipped:\s*(\d+),\s*Total:\s*(\d+)`)
-
-func extractTestStats(output string) string {
-	match := testStatsRegex.FindStringSubmatch(output)
-	if match == nil {
-		return ""
-	}
-	return formatTestStats(match[1], match[2], match[3], match[4])
-}
-
-func formatTestStats(failed, passed, skipped, total string) string {
-	// Plain mode - no colors
-	if term.IsPlain() {
-		return fmt.Sprintf("Failed: %2s  Passed: %3s  Skipped: %2s  Total: %3s", failed, passed, skipped, total)
-	}
-
-	failedN, _ := strconv.Atoi(failed)
-	passedN, _ := strconv.Atoi(passed)
-	skippedN, _ := strconv.Atoi(skipped)
-	totalN, _ := strconv.Atoi(total)
-
-	// Failed: dim if 0, red otherwise
-	var failedStr string
-	if failedN == 0 {
-		failedStr = fmt.Sprintf("%sFailed: %2s%s", term.ColorDim, failed, term.ColorReset)
-	} else {
-		failedStr = fmt.Sprintf("%sFailed: %2s%s", term.ColorRed, failed, term.ColorReset)
-	}
-
-	// Passed: green if passed+skipped=total (all accounted for)
-	var passedStr string
-	if passedN+skippedN == totalN {
-		passedStr = fmt.Sprintf("%sPassed: %3s%s", term.ColorGreen, passed, term.ColorReset)
-	} else {
-		passedStr = fmt.Sprintf("Passed: %3s", passed)
-	}
-
-	// Skipped: dim if 0, yellow otherwise
-	var skippedStr string
-	if skippedN == 0 {
-		skippedStr = fmt.Sprintf("%sSkipped: %2s%s", term.ColorDim, skipped, term.ColorReset)
-	} else {
-		skippedStr = fmt.Sprintf("%sSkipped: %2s%s", term.ColorYellow, skipped, term.ColorReset)
-	}
-
-	totalStr := fmt.Sprintf("Total: %3s", total)
-
-	return fmt.Sprintf("%s  %s  %s  %s", failedStr, passedStr, skippedStr, totalStr)
-}
-
-func (w *statusLineWriter) Write(p []byte) (n int, err error) {
-	n = len(p)
-	w.buffer.Write(p)
-
-	w.mu.Lock()
-	directMode := w.directMode
-	w.mu.Unlock()
-
-	// In direct mode, just print to stderr
-	if directMode {
-		term.Write(p)
-		return n, nil
-	}
-
-	// Process line by line
-	w.lineBuf = append(w.lineBuf, p...)
-	for {
-		idx := bytes.IndexByte(w.lineBuf, '\n')
-		if idx < 0 {
-			break
-		}
-		line := strings.TrimSpace(string(w.lineBuf[:idx]))
-		w.lineBuf = w.lineBuf[idx+1:]
-
-		if line != "" {
-			select {
-			case w.status <- statusUpdate{project: w.project, line: line}:
-			default: // Don't block
-			}
-
-			// Check for failure patterns
-			isFailure := false
-			for _, pattern := range failurePatterns {
-				if strings.Contains(line, pattern) {
-					isFailure = true
-					break
-				}
-			}
-			if !isFailure && failureRegex.MatchString(line) {
-				isFailure = true
-			}
-
-			if isFailure {
-				w.mu.Lock()
-				if !w.directMode {
-					w.directMode = true
-					// Clear status line and print header
-					if term.IsPlain() {
-						term.Status("  FAIL %s\n\n", w.project.Name)
-					} else {
-						term.Status("  %s✗%s %s\n\n", term.ColorRed, term.ColorReset, w.project.Name)
-					}
-					// Print buffered output
-					term.Write(w.buffer.Bytes())
-					if w.onFailure != nil {
-						w.onFailure()
-					}
-				}
-				w.mu.Unlock()
-			}
-		}
-	}
-	return n, nil
-}
-
 // runSolutionCommand runs a dotnet command on the entire solution instead of individual projects
 // This avoids parallel build conflicts when projects share dependencies
 func runSolutionCommand(command string, sln *Solution, projects []*Project, extraArgs []string, root string, db *cache.DB, argsHash string, forwardGraph map[string][]string, projectsByPath map[string]*Project, cachedProjects []*Project, reportsDir string, failedTestFilters map[string]string) bool {
@@ -1315,7 +980,7 @@ func runSolutionCommand(command string, sln *Solution, projects []*Project, extr
 		)
 	}
 
-	term.Verbose("  dotnet %s", shellQuoteArgs(args))
+	term.Verbose("  dotnet %s", term.ShellQuoteArgs(args))
 
 	err := cmd.Run()
 	duration := time.Since(startTime)
@@ -1482,7 +1147,7 @@ func runSolutionGroups(command string, slnGroups map[*Solution][]*Project, remai
 					)
 				}
 
-				term.Verbose("  dotnet %s", shellQuoteArgs(args))
+				term.Verbose("  dotnet %s", term.ShellQuoteArgs(args))
 				err := cmd.Run()
 
 				slnResults <- slnResult{
@@ -2014,7 +1679,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					)
 				}
 
-				term.Verbose("  [%s] dotnet %s", p.Name, shellQuoteArgs(args))
+				term.Verbose("  [%s] dotnet %s", p.Name, term.ShellQuoteArgs(args))
 
 				err := cmd.Run()
 				duration := time.Since(projectStart)
@@ -2106,7 +1771,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 					retryCmd.Dir = root
 					retryCmd.Env = cmd.Env
 
-					term.Verbose("  [%s] dotnet %s", p.Name, shellQuoteArgs(retryArgs))
+					term.Verbose("  [%s] dotnet %s", p.Name, term.ShellQuoteArgs(retryArgs))
 
 					err = retryCmd.Run()
 					duration = time.Since(projectStart)
@@ -2182,7 +1847,7 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 		prefix := fmt.Sprintf("  [%s] %s: ", elapsed, projectName)
 		maxLen := termWidth - len(prefix) - 3 // Reserve space for "..."
 
-		cleanLine := stripAnsi(line)
+		cleanLine := term.StripAnsi(line)
 		if len(cleanLine) > maxLen && maxLen > 0 {
 			line = line[:min(maxLen, len(line))] + "..."
 		}
@@ -2485,142 +2150,4 @@ func runDotnetCommand(command string, projects []*Project, extraArgs []string, r
 	}
 
 	return len(failures) == 0
-}
-
-// needsRestoreRetry checks if a build failure is due to missing NuGet packages
-// This happens when we optimistically skipped restore but packages aren't in cache
-func needsRestoreRetry(output string) bool {
-	// Common patterns indicating missing NuGet packages
-	patterns := []string{
-		"could not be found",                    // CS0006: Metadata file '...' could not be found
-		"are you missing an assembly reference", // CS0234/CS0246
-		"Run a NuGet package restore",           // NU1101 type errors
-		"assets file.*doesn't have a target",    // Assets file issue
-	}
-
-	outputLower := strings.ToLower(output)
-	for _, pattern := range patterns {
-		if strings.Contains(outputLower, strings.ToLower(pattern)) {
-			return true
-		}
-	}
-	return false
-}
-
-// looksLikeDotnetFlag returns true if the arg looks like a dotnet test/build flag
-// that should be passed after the -- separator
-func looksLikeDotnetFlag(arg string) bool {
-	// Common dotnet test/build flags that users might forget to put after --
-	dotnetFlags := []string{
-		"--filter", "-f",
-		"--configuration", "-c",
-		"--framework", "-f",
-		"--runtime", "-r",
-		"--no-build",
-		"--no-restore",
-		"--collect",
-		"--settings", "-s",
-		"--logger", "-l",
-		"--output", "-o",
-		"--results-directory",
-		"--blame",
-		"--blame-crash",
-		"--blame-hang",
-		"--diag",
-		"--verbosity", "-v",
-		"--list-tests", "-lt",
-		"--arch", "-a",
-		"--os",
-	}
-
-	argLower := strings.ToLower(arg)
-	for _, flag := range dotnetFlags {
-		if argLower == flag || strings.HasPrefix(argLower, flag+"=") || strings.HasPrefix(argLower, flag+":") {
-			return true
-		}
-	}
-
-	// Also catch things like "Category!=Live" which is clearly a filter value
-	if strings.Contains(arg, "!=") || strings.Contains(arg, "~") {
-		return true
-	}
-
-	return false
-}
-
-// formatExtraArgs formats extra args for display in status messages
-// Returns empty string if no displayable args, or " (args...)" otherwise
-func formatExtraArgs(args []string) string {
-	display := filterDisplayArgs(args)
-	if len(display) == 0 {
-		return ""
-	}
-	if term.IsPlain() {
-		return " (" + strings.Join(display, " ") + ")"
-	}
-	return " " + term.ColorYellow + "(" + strings.Join(display, " ") + ")" + term.ColorReset
-}
-
-// filterDisplayArgs filters extra args for display, removing internal/verbose flags
-func filterDisplayArgs(args []string) []string {
-	var display []string
-	skip := false
-	for _, arg := range args {
-		if skip {
-			skip = false
-			continue
-		}
-		// Skip internal flags that aren't useful for display
-		if strings.HasPrefix(arg, "--logger:") || strings.HasPrefix(arg, "--results-directory:") {
-			continue
-		}
-		// Skip property flags that are verbose
-		if strings.HasPrefix(arg, "--property:") || strings.HasPrefix(arg, "-p:") {
-			continue
-		}
-		// Skip the next arg if this is a flag that takes a value
-		if arg == "--logger" || arg == "--results-directory" || arg == "-l" || arg == "-r" {
-			skip = true
-			continue
-		}
-		display = append(display, arg)
-	}
-	return display
-}
-
-// prettyPrintFilter prints a test filter in a readable format
-func prettyPrintFilter(projectName, filter string) {
-	// Parse filter: "FullyQualifiedName~Foo|FullyQualifiedName~Bar" -> ["Foo", "Bar"]
-	parts := strings.Split(filter, "|")
-	if len(parts) == 0 {
-		return
-	}
-
-	var testNames []string
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "FullyQualifiedName~") {
-			testNames = append(testNames, strings.TrimPrefix(part, "FullyQualifiedName~"))
-		} else if strings.HasPrefix(part, "FullyQualifiedName=") {
-			testNames = append(testNames, strings.TrimPrefix(part, "FullyQualifiedName="))
-		} else if part != "" {
-			testNames = append(testNames, part)
-		}
-	}
-
-	if len(testNames) == 0 {
-		return
-	}
-
-	// Print project name and test count
-	term.Printf("  %s (%d tests):\n", projectName, len(testNames))
-	for _, name := range testNames {
-		term.Dim("    %s", name)
-	}
-}
-
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-
-func stripAnsi(s string) string {
-	return ansiRegex.ReplaceAllString(s, "")
 }
