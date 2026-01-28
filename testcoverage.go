@@ -82,6 +82,28 @@ const (
 	StalenessCheckBoth                              // Check both git and mtime, report stale if either finds changes
 )
 
+// CoverageGranularity specifies how to group tests when building coverage maps
+type CoverageGranularity int
+
+const (
+	CoverageGranularityMethod CoverageGranularity = iota // Run each test method individually (most precise, slowest)
+	CoverageGranularityClass                             // Group tests by class name (faster, less precise)
+	CoverageGranularityFile                              // Group tests by source file (fastest, file-level precision)
+)
+
+// ParseCoverageGranularity parses a coverage granularity from string
+// Valid values: "method", "class", "file" (defaults to "method")
+func ParseCoverageGranularity(s string) CoverageGranularity {
+	switch strings.ToLower(s) {
+	case "class":
+		return CoverageGranularityClass
+	case "file":
+		return CoverageGranularityFile
+	default:
+		return CoverageGranularityMethod
+	}
+}
+
 // CoverageStatus contains detailed information about coverage staleness
 type CoverageStatus struct {
 	Staleness     CoverageStaleness
@@ -374,6 +396,158 @@ func loadAllTestCoverageMaps(gitRoot string) map[string]*TestCoverageMap {
 	return result
 }
 
+// testGroup represents a group of tests to run together for coverage
+type testGroup struct {
+	name    string   // group identifier (method name, class name, or file path)
+	tests   []string // individual test names in this group
+	filter  string   // dotnet test --filter argument
+}
+
+// getTestClassName extracts the class name from a fully qualified test name
+// e.g., "Namespace.SubNs.ClassName.MethodName" -> "Namespace.SubNs.ClassName"
+func getTestClassName(testName string) string {
+	// Strip parameters first
+	if idx := strings.Index(testName, "("); idx > 0 {
+		testName = testName[:idx]
+	}
+	// Find last dot to separate class from method
+	if idx := strings.LastIndex(testName, "."); idx > 0 {
+		return testName[:idx]
+	}
+	return testName
+}
+
+// groupTestsByClass groups tests by their class name
+func groupTestsByClass(tests []string) []testGroup {
+	classToTests := make(map[string][]string)
+	for _, t := range tests {
+		className := getTestClassName(t)
+		classToTests[className] = append(classToTests[className], t)
+	}
+
+	var groups []testGroup
+	for className, classTests := range classToTests {
+		groups = append(groups, testGroup{
+			name:   className,
+			tests:  classTests,
+			filter: fmt.Sprintf("FullyQualifiedName~%s", className),
+		})
+	}
+	return groups
+}
+
+// testFileInfo contains information about a test file
+type testFileInfo struct {
+	path      string   // relative path to the test file
+	namespace string   // namespace declared in the file
+	classes   []string // class names declared in the file
+}
+
+// scanTestFiles scans .cs files in a directory and extracts namespace and class info
+func scanTestFiles(projectDir string) []testFileInfo {
+	var files []testFileInfo
+
+	namespaceRegex := regexp.MustCompile(`(?m)^\s*namespace\s+([\w.]+)`)
+	classRegex := regexp.MustCompile(`(?m)^\s*(?:public\s+|internal\s+|private\s+)?(?:sealed\s+|abstract\s+|partial\s+)*class\s+(\w+)`)
+
+	filepath.Walk(projectDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".cs") {
+			return nil
+		}
+		// Skip generated files
+		if strings.Contains(path, "/obj/") || strings.Contains(path, "\\obj\\") {
+			return nil
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		var namespace string
+		if m := namespaceRegex.FindSubmatch(content); m != nil {
+			namespace = string(m[1])
+		}
+
+		var classes []string
+		for _, m := range classRegex.FindAllSubmatch(content, -1) {
+			classes = append(classes, string(m[1]))
+		}
+
+		if len(classes) > 0 {
+			relPath, _ := filepath.Rel(projectDir, path)
+			files = append(files, testFileInfo{
+				path:      relPath,
+				namespace: namespace,
+				classes:   classes,
+			})
+		}
+		return nil
+	})
+
+	return files
+}
+
+// buildClassToFileMap builds a map from fully qualified class name to file path
+func buildClassToFileMap(projectDir string) map[string]string {
+	files := scanTestFiles(projectDir)
+	classToFile := make(map[string]string)
+
+	for _, f := range files {
+		for _, className := range f.classes {
+			// Build fully qualified name
+			var fqn string
+			if f.namespace != "" {
+				fqn = f.namespace + "." + className
+			} else {
+				fqn = className
+			}
+			classToFile[fqn] = f.path
+		}
+	}
+	return classToFile
+}
+
+// groupTestsByFile groups tests by their source file
+func groupTestsByFile(tests []string, classToFile map[string]string) []testGroup {
+	fileToTests := make(map[string][]string)
+	fileToClasses := make(map[string]map[string]bool)
+
+	for _, t := range tests {
+		className := getTestClassName(t)
+		filePath, ok := classToFile[className]
+		if !ok {
+			// Fallback: use class name as group
+			filePath = className
+		}
+		fileToTests[filePath] = append(fileToTests[filePath], t)
+		if fileToClasses[filePath] == nil {
+			fileToClasses[filePath] = make(map[string]bool)
+		}
+		fileToClasses[filePath][className] = true
+	}
+
+	var groups []testGroup
+	for filePath, fileTests := range fileToTests {
+		// Build filter for all classes in this file
+		var filterParts []string
+		for className := range fileToClasses[filePath] {
+			filterParts = append(filterParts, fmt.Sprintf("FullyQualifiedName~%s", className))
+		}
+		filter := strings.Join(filterParts, " | ")
+
+		groups = append(groups, testGroup{
+			name:   filePath,
+			tests:  fileTests,
+			filter: filter,
+		})
+	}
+	return groups
+}
+
 // hasCoverletCollector checks if a project has the coverlet.collector package
 func hasCoverletCollector(projectPath string) bool {
 	content, err := os.ReadFile(projectPath)
@@ -386,7 +560,7 @@ func hasCoverletCollector(projectPath string) bool {
 }
 
 // buildTestCoverageMaps builds per-test coverage maps for multiple projects
-func buildTestCoverageMaps(gitRoot string, projects []*Project, maxJobs int) {
+func buildTestCoverageMaps(gitRoot string, projects []*Project, maxJobs int, granularity CoverageGranularity) {
 	cacheDir := filepath.Join(gitRoot, ".donotnet")
 	os.MkdirAll(cacheDir, 0755)
 
@@ -441,7 +615,7 @@ func buildTestCoverageMaps(gitRoot string, projects []*Project, maxJobs int) {
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				buildSingleTestCoverageMap(gitRoot, p, cacheDir, 1) // sequential within project
+				buildSingleTestCoverageMap(gitRoot, p, cacheDir, 1, granularity) // sequential within project
 			}
 		}()
 	}
@@ -454,7 +628,7 @@ func buildTestCoverageMaps(gitRoot string, projects []*Project, maxJobs int) {
 }
 
 // buildSingleTestCoverageMap builds coverage map for a single test project
-func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, maxJobs int) {
+func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, maxJobs int, granularity CoverageGranularity) {
 	absProjectPath := filepath.Join(gitRoot, p.Path)
 	projectDir := filepath.Dir(absProjectPath)
 	mapFile := filepath.Join(cacheDir, p.Name+".testcoverage.json")
@@ -551,24 +725,45 @@ func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, max
 		return
 	}
 
+	// Group tests based on granularity
+	var groups []testGroup
+	switch granularity {
+	case CoverageGranularityClass:
+		groups = groupTestsByClass(pendingTests)
+		term.Printf("  Grouped into %d classes\n", len(groups))
+	case CoverageGranularityFile:
+		classToFile := buildClassToFileMap(projectDir)
+		groups = groupTestsByFile(pendingTests, classToFile)
+		term.Printf("  Grouped into %d files\n", len(groups))
+	default: // CoverageGranularityMethod
+		// Each test is its own group
+		for _, t := range pendingTests {
+			groups = append(groups, testGroup{
+				name:   t,
+				tests:  []string{t},
+				filter: fmt.Sprintf("FullyQualifiedName=%s", t),
+			})
+		}
+	}
+
 	// Step 2: Run tests with coverage in parallel
-	term.Printf("  Running %d tests with coverage...\n", len(pendingTests))
+	term.Printf("  Running %d groups with coverage...\n", len(groups))
 
 	numWorkers := maxJobs
 	if numWorkers <= 0 {
 		numWorkers = runtime.GOMAXPROCS(0)
 	}
-	if numWorkers > len(pendingTests) {
-		numWorkers = len(pendingTests)
+	if numWorkers > len(groups) {
+		numWorkers = len(groups)
 	}
 
-	type testResult struct {
-		testName string
-		files    []string
+	type groupResult struct {
+		group testGroup
+		files []string
 	}
 
-	jobs := make(chan string, len(pendingTests))
-	results := make(chan testResult, len(pendingTests))
+	jobs := make(chan testGroup, len(groups))
+	results := make(chan groupResult, len(groups))
 
 	// Start workers
 	var wg sync.WaitGroup
@@ -579,15 +774,13 @@ func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, max
 			// Each worker gets its own temp directory for coverage
 			workerDir := filepath.Join(projectDir, fmt.Sprintf("TestResults_worker%d", workerID))
 
-			for testName := range jobs {
+			for group := range jobs {
 				// Clean up worker's TestResults
 				os.RemoveAll(workerDir)
 
-				// Run test with coverage (testName is already stripped of parameters)
-				filterArg := fmt.Sprintf("FullyQualifiedName=%s", testName)
-
+				// Run tests with coverage using the group's filter
 				testCmd := exec.Command("dotnet", "test", absProjectPath,
-					"--filter", filterArg,
+					"--filter", group.filter,
 					"--collect", "XPlat Code Coverage",
 					"--results-directory", workerDir,
 					"--no-build")
@@ -597,27 +790,27 @@ func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, max
 				testCmd.Stderr = &stderr
 				runErr := testCmd.Run()
 				if term.IsVerbose() && runErr != nil {
-					term.Verbose("    [%s] test failed: %v", testName, runErr)
+					term.Verbose("    [%s] test failed: %v", group.name, runErr)
 				}
 
 				// Find and parse coverage file
 				coverageFile := coverage.FindCoverageFileIn(workerDir)
 				var coveredFiles []string
 				if coverageFile == "" {
-					term.Verbose("    [%s] no coverage file in %s. stdout=%q", testName, workerDir, stdout.String())
+					term.Verbose("    [%s] no coverage file in %s. stdout=%q", group.name, workerDir, stdout.String())
 				} else {
 					report, err := coverage.ParseFile(coverageFile)
 					if err != nil {
-						term.Verbose("    [%s] failed to parse coverage: %v", testName, err)
+						term.Verbose("    [%s] failed to parse coverage: %v", group.name, err)
 					} else {
 						coveredFiles = report.GetCoveredFilesRelativeToGitRoot(gitRoot)
 						if len(coveredFiles) == 0 && len(report.CoveredFiles) > 0 {
-							term.Verbose("    [%s] coverage has %d files but none resolve to gitRoot. SourceDirs: %v", testName, len(report.CoveredFiles), report.SourceDirs)
+							term.Verbose("    [%s] coverage has %d files but none resolve to gitRoot. SourceDirs: %v", group.name, len(report.CoveredFiles), report.SourceDirs)
 						}
 					}
 				}
 
-				results <- testResult{testName: testName, files: coveredFiles}
+				results <- groupResult{group: group, files: coveredFiles}
 
 				// Clean up
 				os.RemoveAll(workerDir)
@@ -626,38 +819,39 @@ func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, max
 	}
 
 	// Send jobs
-	for _, t := range pendingTests {
-		jobs <- t
+	for _, g := range groups {
+		jobs <- g
 	}
 	close(jobs)
 
 	// Collect results with progress
 	var mu sync.Mutex
-	processed := 0
-	saveInterval := 10 // Save every 10 tests
+	groupsProcessed := 0
+	saveInterval := 10 // Save every 10 groups
 
 	go func() {
 		for r := range results {
 			mu.Lock()
-			if len(r.files) > 0 {
-				covMap.TestToFiles[r.testName] = r.files
-				for _, f := range r.files {
-					covMap.FileToTests[f] = append(covMap.FileToTests[f], r.testName)
+			// Map coverage to all tests in the group
+			for _, testName := range r.group.tests {
+				if len(r.files) > 0 {
+					covMap.TestToFiles[testName] = r.files
+					for _, f := range r.files {
+						covMap.FileToTests[f] = append(covMap.FileToTests[f], testName)
+					}
+				} else {
+					// Mark as processed even if no coverage (empty slice)
+					covMap.TestToFiles[testName] = []string{}
 				}
-			} else {
-				// Mark as processed even if no coverage (empty slice)
-				covMap.TestToFiles[r.testName] = []string{}
+				covMap.ProcessedTests++
 			}
-			covMap.ProcessedTests++
-			processed++
+			groupsProcessed++
 
 			// Show progress
-			progress := covMap.ProcessedTests
-			total := covMap.TotalTests
-			term.Status("  [%s] %d/%d processed", p.Name, progress, total)
+			term.Status("  [%s] %d/%d groups (%d tests)", p.Name, groupsProcessed, len(groups), covMap.ProcessedTests)
 
 			// Periodic save for resume support
-			if processed%saveInterval == 0 {
+			if groupsProcessed%saveInterval == 0 {
 				covMap.GeneratedAt = time.Now()
 				saveTestCoverageMap(mapFile, covMap)
 			}
@@ -677,6 +871,102 @@ func buildSingleTestCoverageMap(gitRoot string, p *Project, cacheDir string, max
 	}
 
 	term.Success("  Processed %d/%d tests, %d files mapped → %s", covMap.ProcessedTests, len(tests), len(covMap.FileToTests), mapFile)
+}
+
+// listTestCoverageGroupings lists how tests would be grouped for each granularity level
+func listTestCoverageGroupings(gitRoot string, projects []*Project) {
+	for _, p := range projects {
+		if !p.IsTest {
+			continue
+		}
+
+		absProjectPath := filepath.Join(gitRoot, p.Path)
+		projectDir := filepath.Dir(absProjectPath)
+
+		term.Info("%s", p.Name)
+
+		// List all tests
+		cmd := exec.Command("dotnet", "test", absProjectPath, "--list-tests", "--no-build")
+		cmd.Dir = gitRoot
+		output, err := cmd.Output()
+		if err != nil {
+			term.Errorf("  failed to list tests: %v", err)
+			continue
+		}
+
+		// Parse test names
+		testLineRegex := regexp.MustCompile(`^\s{4}(\S.+)$`)
+		var tests []string
+		inTestList := false
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "The following Tests are available:") {
+				inTestList = true
+				continue
+			}
+			if inTestList {
+				if match := testLineRegex.FindStringSubmatch(line); match != nil {
+					tests = append(tests, strings.TrimSpace(match[1]))
+				}
+			}
+		}
+
+		if len(tests) == 0 {
+			term.Warn("  no tests found")
+			continue
+		}
+
+		// Deduplicate (strip parameters)
+		seenBase := make(map[string]bool)
+		var uniqueTests []string
+		for _, t := range tests {
+			baseName := t
+			if idx := strings.Index(t, "("); idx > 0 {
+				baseName = t[:idx]
+			}
+			if !seenBase[baseName] {
+				seenBase[baseName] = true
+				uniqueTests = append(uniqueTests, baseName)
+			}
+		}
+
+		term.Printf("  Total: %d tests (%d unique)\n", len(tests), len(uniqueTests))
+		term.Println()
+
+		// Method granularity
+		term.Printf("  %smethod%s: %d groups (1 test each)\n",
+			term.Color(term.ColorYellow), term.Color(term.ColorReset), len(uniqueTests))
+
+		// Class granularity
+		classGroups := groupTestsByClass(uniqueTests)
+		classReduction := float64(len(uniqueTests)) / float64(len(classGroups))
+		term.Printf("  %sclass%s:  %d groups (%.1fx reduction)\n",
+			term.Color(term.ColorGreen), term.Color(term.ColorReset), len(classGroups), classReduction)
+
+		// Show class groups
+		for _, g := range classGroups {
+			if len(g.tests) > 1 {
+				term.Printf("    %s%s%s: %d tests\n",
+					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests))
+			}
+		}
+
+		// File granularity
+		classToFile := buildClassToFileMap(projectDir)
+		fileGroups := groupTestsByFile(uniqueTests, classToFile)
+		fileReduction := float64(len(uniqueTests)) / float64(len(fileGroups))
+		term.Printf("  %sfile%s:   %d groups (%.1fx reduction)\n",
+			term.Color(term.ColorCyan), term.Color(term.ColorReset), len(fileGroups), fileReduction)
+
+		// Show file groups
+		for _, g := range fileGroups {
+			if len(g.tests) > 1 {
+				term.Printf("    %s%s%s: %d tests\n",
+					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests))
+			}
+		}
+
+		term.Println()
+	}
 }
 
 // listAllTests runs dotnet test --list-tests on each project and outputs JSON

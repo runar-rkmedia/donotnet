@@ -470,3 +470,85 @@ public class ServiceIntegrationTests : IntegrationTests {
 		t.Errorf("expected reason to mention referenced, got: %s", result.Reason)
 	}
 }
+
+func TestGetTestClassName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Namespace.ClassName.MethodName", "Namespace.ClassName"},
+		{"Namespace.SubNs.ClassName.MethodName", "Namespace.SubNs.ClassName"},
+		{"Namespace.ClassName.MethodName(param1)", "Namespace.ClassName"},
+		{"ClassName.MethodName", "ClassName"},
+		{"MethodName", "MethodName"}, // edge case: no dots
+	}
+
+	for _, tc := range tests {
+		result := getTestClassName(tc.input)
+		if result != tc.expected {
+			t.Errorf("getTestClassName(%q) = %q, expected %q", tc.input, result, tc.expected)
+		}
+	}
+}
+
+func TestGroupTestsByClass(t *testing.T) {
+	tests := []string{
+		"Namespace.FooTests.TestA",
+		"Namespace.FooTests.TestB",
+		"Namespace.BarTests.TestC",
+		"Namespace.FooTests.TestD(param)",
+	}
+
+	groups := groupTestsByClass(tests)
+
+	// Should have 2 groups: FooTests and BarTests
+	if len(groups) != 2 {
+		t.Errorf("expected 2 groups, got %d", len(groups))
+	}
+
+	// Find FooTests group
+	var fooGroup *testGroup
+	for i := range groups {
+		if groups[i].name == "Namespace.FooTests" {
+			fooGroup = &groups[i]
+			break
+		}
+	}
+
+	if fooGroup == nil {
+		t.Fatal("FooTests group not found")
+	}
+
+	// FooTests should have 3 tests (TestD with param is still in FooTests)
+	if len(fooGroup.tests) != 3 {
+		t.Errorf("expected FooTests to have 3 tests, got %d: %v", len(fooGroup.tests), fooGroup.tests)
+	}
+
+	// Filter should use tilde for partial match
+	if !strings.Contains(fooGroup.filter, "FullyQualifiedName~Namespace.FooTests") {
+		t.Errorf("expected filter to contain partial match, got: %s", fooGroup.filter)
+	}
+}
+
+func TestParseCoverageGranularity(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected CoverageGranularity
+	}{
+		{"method", CoverageGranularityMethod},
+		{"METHOD", CoverageGranularityMethod},
+		{"class", CoverageGranularityClass},
+		{"CLASS", CoverageGranularityClass},
+		{"file", CoverageGranularityFile},
+		{"FILE", CoverageGranularityFile},
+		{"invalid", CoverageGranularityMethod}, // default
+		{"", CoverageGranularityMethod},        // default
+	}
+
+	for _, tc := range tests {
+		result := ParseCoverageGranularity(tc.input)
+		if result != tc.expected {
+			t.Errorf("ParseCoverageGranularity(%q) = %v, expected %v", tc.input, result, tc.expected)
+		}
+	}
+}
