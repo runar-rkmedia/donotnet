@@ -2,11 +2,12 @@ package coverage
 
 import (
 	"context"
-	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/term"
+	"github.com/runar-rkmedia/donotnet/testfilter"
 )
 
 // GroupingStats holds statistics for a single project's coverage groupings.
@@ -30,8 +31,8 @@ func ListGroupings(ctx context.Context, gitRoot string, projects []*project.Proj
 			continue
 		}
 
-		absProjectPath := fmt.Sprintf("%s/%s", gitRoot, p.Path)
-		projectDir := fmt.Sprintf("%s/%s", gitRoot, strings.TrimSuffix(p.Path, "/"+p.Name+".csproj"))
+		absProjectPath := filepath.Join(gitRoot, p.Path)
+		projectDir := filepath.Dir(absProjectPath)
 
 		term.Info("%s", p.Name)
 
@@ -60,7 +61,15 @@ func ListGroupings(ctx context.Context, gitRoot string, projects []*project.Proj
 			}
 		}
 
+		// Build trait map for this project
+		traitMap := testfilter.BuildTraitMap(projectDir)
+		allTraits := traitMap.AllTraits()
+
 		term.Printf("  Total: %d tests (%d unique)\n", len(tests), len(uniqueTests))
+		if len(allTraits) > 0 {
+			term.Printf("  Traits: %s%s%s\n",
+				term.Color(term.ColorYellow), strings.Join(allTraits, ", "), term.Color(term.ColorReset))
+		}
 		term.Println()
 
 		// Method granularity
@@ -75,8 +84,13 @@ func ListGroupings(ctx context.Context, gitRoot string, projects []*project.Proj
 
 		for _, g := range classGroups {
 			if len(g.tests) > 1 {
-				term.Printf("    %s%s%s: %d tests\n",
-					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests))
+				groupTraits := collectGroupTraits(g.tests, traitMap)
+				traitSuffix := ""
+				if len(groupTraits) > 0 {
+					traitSuffix = " " + term.Color(term.ColorYellow) + "[" + strings.Join(groupTraits, ", ") + "]" + term.Color(term.ColorReset)
+				}
+				term.Printf("    %s%s%s: %d tests%s\n",
+					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests), traitSuffix)
 			}
 		}
 
@@ -89,8 +103,13 @@ func ListGroupings(ctx context.Context, gitRoot string, projects []*project.Proj
 
 		for _, g := range fileGroups {
 			if len(g.tests) > 1 {
-				term.Printf("    %s%s%s: %d tests\n",
-					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests))
+				groupTraits := collectGroupTraits(g.tests, traitMap)
+				traitSuffix := ""
+				if len(groupTraits) > 0 {
+					traitSuffix = " " + term.Color(term.ColorYellow) + "[" + strings.Join(groupTraits, ", ") + "]" + term.Color(term.ColorReset)
+				}
+				term.Printf("    %s%s%s: %d tests%s\n",
+					term.Color(term.ColorDim), g.name, term.Color(term.ColorReset), len(g.tests), traitSuffix)
 			}
 		}
 
@@ -227,4 +246,19 @@ func printGroupingSummary(stats []GroupingStats) {
 		term.Color(term.ColorDim), term.Color(term.ColorReset),
 		term.Color(term.ColorGreen), recommended, term.Color(term.ColorReset))
 	term.Println()
+}
+
+// collectGroupTraits collects unique traits from all tests in a group.
+func collectGroupTraits(tests []string, traitMap testfilter.TraitMap) []string {
+	seen := make(map[string]bool)
+	var traits []string
+	for _, t := range tests {
+		for _, trait := range traitMap.GetTraitsForTest(t) {
+			if !seen[trait] {
+				seen[trait] = true
+				traits = append(traits, trait)
+			}
+		}
+	}
+	return traits
 }

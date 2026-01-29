@@ -2,7 +2,9 @@ package testfilter
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -253,6 +255,158 @@ func AreAllTestsExcludedInFile(content string, excludedCategories []string) (boo
 
 	// All test methods have at least one excluded trait
 	return true, uniqueStrings(allExcludedTraits), len(allTestMethods)
+}
+
+// TraitMap holds class-level and method-level trait mappings for a project.
+type TraitMap struct {
+	// ClassTraits maps fully qualified class name -> list of traits
+	ClassTraits map[string][]string
+	// MethodTraits maps fully qualified method name -> list of traits
+	MethodTraits map[string][]string
+}
+
+// BuildTraitMap walks a project directory and builds a map of traits per class and method.
+func BuildTraitMap(projectDir string) TraitMap {
+	tm := TraitMap{
+		ClassTraits:  make(map[string][]string),
+		MethodTraits: make(map[string][]string),
+	}
+
+	namespaceRegex := regexp.MustCompile(`(?m)^\s*namespace\s+([\w.]+)`)
+
+	filepath.Walk(projectDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".cs") {
+			return nil
+		}
+		if strings.Contains(path, string(os.PathSeparator)+"obj"+string(os.PathSeparator)) {
+			return nil
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		src := StripCSharpComments(string(content))
+
+		var namespace string
+		if m := namespaceRegex.FindStringSubmatch(src); m != nil {
+			namespace = m[1]
+		}
+
+		// Find classes and their traits
+		classMatches := classBlockRegex.FindAllStringSubmatchIndex(src, -1)
+		for i, classMatch := range classMatches {
+			if len(classMatch) < 6 {
+				continue
+			}
+
+			classAttrs := ""
+			if classMatch[2] >= 0 && classMatch[3] >= 0 {
+				classAttrs = src[classMatch[2]:classMatch[3]]
+			}
+			className := src[classMatch[4]:classMatch[5]]
+
+			fqClassName := className
+			if namespace != "" {
+				fqClassName = namespace + "." + className
+			}
+
+			classTraits := ExtractTraitsFromAttributes(classAttrs)
+			if len(classTraits) > 0 {
+				tm.ClassTraits[fqClassName] = classTraits
+			}
+
+			// Find methods within this class body
+			classStart := classMatch[0]
+			classEnd := len(src)
+			if i+1 < len(classMatches) {
+				classEnd = classMatches[i+1][0]
+			}
+			classBody := src[classStart:classEnd]
+
+			methodMatches := testMethodBlockRegex.FindAllStringSubmatch(classBody, -1)
+			for _, methodMatch := range methodMatches {
+				if len(methodMatch) < 3 {
+					continue
+				}
+				methodAttrs := methodMatch[1]
+				methodName := methodMatch[2]
+				if !TestAttributeRegex.MatchString(methodAttrs) {
+					continue
+				}
+
+				methodTraits := ExtractTraitsFromAttributes(methodAttrs)
+				if len(methodTraits) > 0 {
+					fqMethodName := fqClassName + "." + methodName
+					tm.MethodTraits[fqMethodName] = methodTraits
+				}
+			}
+		}
+
+		return nil
+	})
+
+	return tm
+}
+
+// GetTraitsForTest returns combined class-level and method-level traits for a test name.
+func (tm TraitMap) GetTraitsForTest(testName string) []string {
+	// Strip parameters
+	baseName := testName
+	if idx := strings.Index(testName, "("); idx > 0 {
+		baseName = testName[:idx]
+	}
+
+	traits := make(map[string]bool)
+
+	// Add class-level traits
+	className := baseName
+	if idx := strings.LastIndex(baseName, "."); idx > 0 {
+		className = baseName[:idx]
+	}
+	for _, t := range tm.ClassTraits[className] {
+		traits[t] = true
+	}
+
+	// Add method-level traits
+	for _, t := range tm.MethodTraits[baseName] {
+		traits[t] = true
+	}
+
+	if len(traits) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, len(traits))
+	for t := range traits {
+		result = append(result, t)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// AllTraits returns a deduplicated sorted list of all traits in the map.
+func (tm TraitMap) AllTraits() []string {
+	traits := make(map[string]bool)
+	for _, ts := range tm.ClassTraits {
+		for _, t := range ts {
+			traits[t] = true
+		}
+	}
+	for _, ts := range tm.MethodTraits {
+		for _, t := range ts {
+			traits[t] = true
+		}
+	}
+	result := make([]string, 0, len(traits))
+	for t := range traits {
+		result = append(result, t)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // ExtractTraitsFromAttributes extracts category traits from an attributes block
