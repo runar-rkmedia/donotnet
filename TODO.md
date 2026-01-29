@@ -144,4 +144,14 @@ Ordered by effort (trivial → medium). Check off as completed.
 | 6 | Misplaced dotnet flag hint | ~10 lines in cobra cmd | ✅ | ✅ `TestMisplacedFilterHint` |
 | 4 | Suggestions system | Port ~100 lines + 3 call sites | ✅ | ✅ `TestSuggestionsShown`, `TestSuggestionsSuppressed` |
 | 8 | Did-you-mean for flags | Verify cobra, possibly ~10 lines | ✅ | ✅ `TestFlagSuggestion`, `TestFlagSuggestionBuild` |
-| 1 | Watch mode | Port ~261 lines into runner | ✅ | — (interactive, not e2e testable) |
+| 1 | Watch mode | Port ~261 lines into runner | ✅ | ✅ `TestWatchStartsAndWatches` |
+
+---
+
+## Follow-up
+
+- **E2E test speed**: The e2e suite takes ~47s because each test copies the fixture, inits a git repo, and runs dotnet. `go test ./...` appears to hang because there's no output during this. Options:
+  - Share a single pre-built fixture across tests (build once in `TestMain`, copy the built output)
+  - Use `t.Parallel()` where possible
+  - Add `t.Log` progress output so `-v` shows activity
+  - Gate e2e behind a build tag (e.g. `//go:build e2e`) so `go test ./...` skips them by default
