@@ -269,6 +269,16 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
+	// Watch mode: run initial build/test if needed, then start watching
+	if r.opts.Watch {
+		if len(targetProjects) > 0 {
+			r.runProjects(ctx, targetProjects, cachedProjects, argsHash)
+		} else if !r.opts.Quiet {
+			term.Dim("No affected projects to %s (%d cached)%s", r.opts.Command, len(cachedProjects), formatExtraArgs(r.opts.DotnetArgs))
+		}
+		return r.runWatch(ctx, r.projects, argsHash)
+	}
+
 	if len(targetProjects) == 0 {
 		if !r.opts.Quiet {
 			term.Dim("No affected projects to %s (%d cached)%s", r.opts.Command, len(cachedProjects), formatExtraArgs(r.opts.DotnetArgs))
@@ -286,11 +296,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		if r.opts.Command == "test" {
 			suggestions.PrintOnce(suggestions.CheckCoverage(r.gitRoot, r.opts.StalenessCheck))
 		}
-	}
-
-	// Run the command
-	if r.opts.Watch {
-		return r.runWatch(ctx, targetProjects, argsHash)
 	}
 
 	success := r.runProjects(ctx, targetProjects, cachedProjects, argsHash)

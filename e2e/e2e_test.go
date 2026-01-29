@@ -486,6 +486,22 @@ func TestWatchStartsAndWatches(t *testing.T) {
 	assertContains(t, r, "directories")
 }
 
+func TestWatchStartsWhenCached(t *testing.T) {
+	needsDotnet(t)
+	dir := setupFixtureWithGit(t)
+
+	// First run populates the cache
+	r := runCLI(t, binaryPath, dir, "test")
+	if r.ExitCode != 0 {
+		t.Fatalf("initial test run failed: %s", r.Stderr)
+	}
+
+	// Second run with --watch should still enter watch mode even though
+	// everything is cached (no changed projects).
+	r = runCLIWaitFor(t, binaryPath, dir, "Watching", 5*time.Second, "test", "--watch")
+	assertContains(t, r, "directories")
+}
+
 // --- Untested project detection ---
 
 func TestUntestedProjectWarning(t *testing.T) {
