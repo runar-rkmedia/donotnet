@@ -360,6 +360,31 @@ func TestSuggestionsShown(t *testing.T) {
 	assertContains(t, r, "ParallelTestFramework")
 }
 
+func TestSuggestionsShownWhenCached(t *testing.T) {
+	needsDotnet(t)
+	dir := setupFixtureWithGit(t)
+
+	// First run — populates cache
+	r1 := runCLI(t, binaryPath, dir, "test", "--force")
+	assertExit(t, r1, 0)
+
+	// Second run — all cached, zero targets. Suggestions should still appear.
+	r2 := runCLI(t, binaryPath, dir, "test")
+	assertExit(t, r2, 0)
+	assertContains(t, r2, "TIP")
+	assertContains(t, r2, "ParallelTestFramework")
+}
+
+func TestSuggestionsShownInWatchMode(t *testing.T) {
+	needsDotnet(t)
+	dir := setupFixtureWithGit(t)
+
+	// Watch mode should show suggestions before entering the watch loop.
+	r := runCLIWaitFor(t, binaryPath, dir, "Watching", 30*time.Second, "test", "--force", "--watch")
+	assertContains(t, r, "TIP")
+	assertContains(t, r, "ParallelTestFramework")
+}
+
 func TestSuggestionsSuppressed(t *testing.T) {
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)

@@ -20,6 +20,7 @@ import (
 	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/suggestions"
 	"github.com/runar-rkmedia/donotnet/term"
+	"github.com/runar-rkmedia/donotnet/testfilter"
 )
 
 // Runner executes test and build commands.
@@ -127,13 +128,21 @@ func (r *Runner) Run(ctx context.Context) error {
 			return nil
 		}
 		coverage.BuildPerTestCoverageMaps(coverage.BuildOptions{
-			GitRoot:     r.gitRoot,
-			Projects:    testProjects,
-			MaxJobs:     r.opts.EffectiveParallel(),
-			Granularity: coverage.ParseGranularity(r.opts.CoverageGranularity),
-			Ctx:         ctx,
+			GitRoot:      r.gitRoot,
+			Projects:     testProjects,
+			ForwardGraph: r.forwardGraph,
+			MaxJobs:      r.opts.EffectiveParallel(),
+			Granularity:  coverage.ParseGranularity(r.opts.CoverageGranularity),
+			Ctx:          ctx,
+			Cache:        newTestListCache(r.db, r.gitRoot, r.forwardGraph),
 		})
 		return nil
+	}
+
+	// Always fetch dirty files (used for test filtering even without VCS mode)
+	dirtyFiles := git.GetDirtyFiles(r.gitRoot)
+	if len(dirtyFiles) > 0 {
+		term.Verbose("Dirty files: %d", len(dirtyFiles))
 	}
 
 	// Get VCS state
@@ -152,7 +161,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			term.Verbose("VCS filter: changes vs %s (%d files)", r.opts.VcsRef, len(vcsChangedFiles))
 		} else {
-			vcsChangedFiles = git.GetDirtyFiles(r.gitRoot)
+			vcsChangedFiles = dirtyFiles
 			if len(vcsChangedFiles) == 0 {
 				term.Dim("No uncommitted changes")
 				return nil
@@ -269,6 +278,37 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
+	// Set up test filter for non-watch mode (same filtering as watch mode).
+	// Skip when --force is used since that means "run everything".
+	if r.opts.Command == "test" && len(dirtyFiles) > 0 && !r.opts.Force && !r.opts.Watch {
+		testCovMaps := loadAllTestCoverageMaps(r.cacheDir)
+		if len(testCovMaps) > 0 {
+			term.Verbose("Loaded per-test coverage for %d project(s)", len(testCovMaps))
+		}
+		tf := testfilter.NewTestFilter()
+		tf.SetCoverageMaps(testCovMaps)
+		tf.SetHeuristics(testfilter.ParseHeuristics(r.opts.Heuristics))
+
+		// Map dirty files to their owning projects
+		for _, f := range dirtyFiles {
+			for _, p := range r.projects {
+				if strings.HasPrefix(f, p.Dir+"/") || strings.HasPrefix(f, p.Dir+string(os.PathSeparator)) {
+					tf.AddChangedFile(p.Path, f)
+					break
+				}
+			}
+		}
+		r.opts.TestFilter = tf
+	}
+
+	// Show suggestions (unless suppressed) — before watch/cached paths that return early
+	if !r.opts.NoSuggestions {
+		suggestions.Print(suggestions.Run(r.projects))
+		if r.opts.Command == "test" {
+			suggestions.PrintOnce(suggestions.CheckCoverage(r.gitRoot, r.opts.StalenessCheck))
+		}
+	}
+
 	// Watch mode: run initial build/test if needed, then start watching
 	if r.opts.Watch {
 		if len(targetProjects) > 0 {
@@ -287,15 +327,26 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			term.Summary(0, 0, len(cachedProjects), 0, true)
 		}
-		return nil
-	}
 
-	// Show suggestions (unless suppressed)
-	if !r.opts.NoSuggestions {
-		suggestions.Print(suggestions.Run(r.projects))
-		if r.opts.Command == "test" {
-			suggestions.PrintOnce(suggestions.CheckCoverage(r.gitRoot, r.opts.StalenessCheck))
+		// Print cached outputs if requested
+		if r.opts.PrintOutput && len(cachedProjects) > 0 {
+			sorted := make([]*project.Project, len(cachedProjects))
+			copy(sorted, cachedProjects)
+			sort.Slice(sorted, func(i, j int) bool {
+				return sorted[i].Name < sorted[j].Name
+			})
+			term.Println()
+			for _, p := range sorted {
+				relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
+				contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
+				key := cache.MakeKey(contentHash, argsHash, p.Path)
+				if result := r.db.Lookup(key); result != nil && len(result.Output) > 0 {
+					term.Printf("=== %s ===\n%s\n", p.Name, string(result.Output))
+				}
+			}
 		}
+
+		return nil
 	}
 
 	success := r.runProjects(ctx, targetProjects, cachedProjects, argsHash)
@@ -307,25 +358,36 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // findChangedProjects returns projects that have changes.
+// Projects are checked concurrently since content hash computation involves filesystem I/O.
 func (r *Runner) findChangedProjects(argsHash string, vcsChangedFiles []string, useVcsFilter bool) map[string]bool {
 	changed := make(map[string]bool)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	for _, p := range r.projects {
-		// If using VCS filter, check if project has VCS changes
-		if useVcsFilter {
-			relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
-			projectVcsFiles := project.FilterFilesToProject(vcsChangedFiles, relevantDirs)
-			if len(projectVcsFiles) == 0 {
-				continue
-			}
-			term.Verbose("  vcs candidate: %s (%d files)", p.Name, len(projectVcsFiles))
-		}
+		wg.Add(1)
+		go func(p *project.Project) {
+			defer wg.Done()
 
-		// Check cache
-		if r.projectChanged(p, argsHash) {
-			changed[p.Path] = true
-		}
+			// If using VCS filter, check if project has VCS changes
+			if useVcsFilter {
+				relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
+				projectVcsFiles := project.FilterFilesToProject(vcsChangedFiles, relevantDirs)
+				if len(projectVcsFiles) == 0 {
+					return
+				}
+				term.Verbose("  vcs candidate: %s (%d files)", p.Name, len(projectVcsFiles))
+			}
+
+			// Check cache
+			if r.projectChanged(p, argsHash) {
+				mu.Lock()
+				changed[p.Path] = true
+				mu.Unlock()
+			}
+		}(p)
 	}
+	wg.Wait()
 
 	return changed
 }
@@ -359,6 +421,16 @@ func (r *Runner) projectChanged(p *project.Project, argsHash string) bool {
 func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Project, argsHash string) bool {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Handle Ctrl+C — must be before solution path which returns early
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, shutdownSignals...)
+	go func() {
+		<-sigChan
+		term.Warn("\nInterrupted, killing processes...")
+		cancel()
+	}()
+	defer signal.Stop(sigChan)
 
 	// Build args string for caching
 	argsForCache := strings.Join(append([]string{r.opts.Command}, r.opts.DotnetArgs...), " ")
@@ -407,16 +479,6 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 			return r.runSolutionGroups(ctx, slnGroups, remaining, cached, argsHash, argsForCache)
 		}
 	}
-
-	// Handle Ctrl+C
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, shutdownSignals...)
-	go func() {
-		<-sigChan
-		term.Warn("\nInterrupted, killing processes...")
-		cancel()
-	}()
-	defer signal.Stop(sigChan)
 
 	numWorkers := r.opts.EffectiveParallel()
 	if numWorkers <= 0 {
