@@ -17,6 +17,7 @@ import (
 	"github.com/runar-rkmedia/donotnet/cache"
 	"github.com/runar-rkmedia/donotnet/git"
 	"github.com/runar-rkmedia/donotnet/project"
+	"github.com/runar-rkmedia/donotnet/suggestions"
 	"github.com/runar-rkmedia/donotnet/term"
 )
 
@@ -51,9 +52,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		term.SetProgress(false)
 	}
 
-	// Auto-quiet for informational dotnet args
+	// Auto-quiet for informational dotnet args (e.g. --list-tests, --help)
 	if shouldAutoQuiet(r.opts.DotnetArgs) {
 		term.SetQuiet(true)
+		r.opts.PrintOutput = true
 	}
 
 	// Find git root
@@ -167,6 +169,83 @@ func (r *Runner) Run(ctx context.Context) error {
 		targetProjects = append(targetProjects, p)
 	}
 
+	// Handle --failed: filter to only previously-failed projects with per-test filters
+	if r.opts.Failed {
+		failedEntries := r.db.GetFailed(argsHash)
+		if len(failedEntries) == 0 {
+			term.Info("--failed: No previously failed projects found in cache.")
+			term.Info("         This happens when tests haven't been run yet, or all tests passed.")
+			term.Info("         Running all affected tests instead.\n")
+		} else {
+			failedPaths := make(map[string]bool)
+			r.opts.FailedTestFilters = make(map[string]string)
+			for _, entry := range failedEntries {
+				failedPaths[entry.ProjectPath] = true
+				if p, ok := r.projectsByPath[entry.ProjectPath]; ok {
+					filter := getFailedTestFilter(entry.Output, r.reportsDir, p.Name)
+					if filter != "" {
+						r.opts.FailedTestFilters[entry.ProjectPath] = filter
+						term.Verbose("  %s: filtering to %d failed tests", p.Name, strings.Count(filter, "|")+1)
+					}
+				}
+			}
+
+			var failedProjects []*project.Project
+			for _, p := range targetProjects {
+				if failedPaths[p.Path] {
+					failedProjects = append(failedProjects, p)
+				}
+			}
+
+			if len(failedProjects) == 0 {
+				term.Info("--failed: Previously failed projects no longer exist or are not affected.")
+				term.Info("         Running all affected tests instead.\n")
+			} else {
+				filterCount := 0
+				for range r.opts.FailedTestFilters {
+					filterCount++
+				}
+				if filterCount > 0 {
+					term.Info("Running %d previously failed project(s) with test-level filtering", len(failedProjects))
+				} else {
+					term.Info("Running %d previously failed project(s)", len(failedProjects))
+				}
+				targetProjects = failedProjects
+				cachedProjects = nil
+			}
+		}
+	}
+
+	// Find untested projects (non-test projects with no test project referencing them)
+	// and add them as build-only targets so we at least verify compilation.
+	if r.opts.Command == "test" {
+		untestedProjects := project.FindUntestedProjects(r.projects, r.forwardGraph)
+		if len(untestedProjects) > 0 {
+			buildArgsHash := HashArgs(append([]string{"build"}, filterBuildArgs(r.opts.DotnetArgs)...))
+			r.opts.BuildOnlyProjects = make(map[string]bool)
+			var untestedNames []string
+			for _, p := range untestedProjects {
+				if !affected[p.Path] {
+					continue
+				}
+				// Re-check cache with build-specific hash
+				relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
+				contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
+				key := cache.MakeKey(contentHash, buildArgsHash, p.Path)
+				if !r.opts.Force && r.db.Lookup(key) != nil {
+					cachedProjects = append(cachedProjects, p)
+					continue
+				}
+				r.opts.BuildOnlyProjects[p.Path] = true
+				targetProjects = append(targetProjects, p)
+				untestedNames = append(untestedNames, p.Name)
+			}
+			if len(untestedNames) > 0 {
+				term.Warnf("%d project(s) have no tests, will build instead: %s", len(untestedNames), strings.Join(untestedNames, ", "))
+			}
+		}
+	}
+
 	if len(targetProjects) == 0 {
 		if !r.opts.Quiet {
 			term.Dim("No affected projects to %s (%d cached)%s", r.opts.Command, len(cachedProjects), formatExtraArgs(r.opts.DotnetArgs))
@@ -176,6 +255,11 @@ func (r *Runner) Run(ctx context.Context) error {
 			term.Summary(0, 0, len(cachedProjects), 0, true)
 		}
 		return nil
+	}
+
+	// Show suggestions (unless suppressed)
+	if !r.opts.NoSuggestions {
+		suggestions.Print(suggestions.Run(r.projects))
 	}
 
 	// Run the command
@@ -227,6 +311,10 @@ func (r *Runner) projectChanged(p *project.Project, argsHash string) bool {
 	}
 
 	if result := r.db.Lookup(key); result != nil {
+		if r.opts.PrintOutput && p.IsTest && len(result.Output) == 0 {
+			term.Verbose("  cache miss (no output): %s (key=%s)", p.Name, key)
+			return true
+		}
 		term.Verbose("  cache hit: %s (key=%s)", p.Name, key)
 		return false
 	}
@@ -1099,9 +1187,4 @@ func (r *Runner) printStartMessage(targets, cached []*project.Project, numWorker
 	}
 }
 
-// runWatch runs in watch mode.
-func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsHash string) error {
-	term.Println("Watch mode - not yet implemented in new runner")
-	term.Println("Use the old CLI for watch mode")
-	return fmt.Errorf("watch mode not implemented")
-}
+// runWatch is implemented in watch.go

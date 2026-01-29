@@ -165,3 +165,34 @@ func setupFixtureWithGit(t *testing.T) string {
 	initGitRepo(t, dir)
 	return dir
 }
+
+// gitAdd stages files in a git repo.
+func gitAdd(t *testing.T, dir string, paths ...string) {
+	t.Helper()
+	args := append([]string{"add"}, paths...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+}
+
+// gitCommit creates a commit in a git repo.
+func gitCommit(t *testing.T, dir, message string) {
+	t.Helper()
+	cmd := exec.Command("git", "commit", "-m", message)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit failed: %v\n%s", err, out)
+	}
+}
+
+// addProjectToSolution adds a project to the .sln file using dotnet sln.
+func addProjectToSolution(t *testing.T, dir, projectName string) {
+	t.Helper()
+	cmd := exec.Command("dotnet", "sln", "add", projectName)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dotnet sln add failed: %v\n%s", err, out)
+	}
+}
