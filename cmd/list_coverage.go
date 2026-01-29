@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"path/filepath"
 	"sort"
 
@@ -11,16 +12,20 @@ import (
 
 var (
 	listCoverageGranularity string
+	listCoverageGroupings   bool
 )
 
 var listCoverageCmd = &cobra.Command{
 	Use:   "coverage",
-	Short: "List test groupings for coverage granularity levels",
-	Long: `List test groupings based on existing coverage data.
+	Short: "List test coverage data and groupings",
+	Long: `List test coverage data and groupings.
 
-Shows which test projects cover which source files, based on
-previously collected coverage data. Run 'donotnet coverage build'
-first to generate coverage data.
+By default, shows which test projects cover which source files based on
+previously collected coverage data. Run 'donotnet coverage build' first
+to generate coverage data.
+
+With --groupings, shows how tests would be grouped for each granularity
+level (method/class/file) and the reduction in test runs.
 
 Granularity levels:
   method - Most precise, groups by individual test methods
@@ -32,7 +37,12 @@ Granularity levels:
 			return err
 		}
 
-		// Build coverage map from existing coverage data
+		if listCoverageGroupings {
+			coverage.ListGroupings(context.Background(), scan.GitRoot, scan.Projects)
+			return nil
+		}
+
+		// Default: show existing coverage map
 		var testProjects []coverage.TestProject
 		for _, p := range scan.Projects {
 			if !p.IsTest {
@@ -94,5 +104,6 @@ Granularity levels:
 
 func init() {
 	listCoverageCmd.Flags().StringVar(&listCoverageGranularity, "granularity", "class", "Coverage granularity: method, class, file")
+	listCoverageCmd.Flags().BoolVar(&listCoverageGroupings, "groupings", false, "Show test groupings for each granularity level")
 	listCmd.AddCommand(listCoverageCmd)
 }

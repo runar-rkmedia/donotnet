@@ -146,7 +146,7 @@ Ordered by effort (trivial → medium). Check off as completed.
 | 8 | Did-you-mean for flags | Verify cobra, possibly ~10 lines | ✅ | ✅ `TestFlagSuggestion`, `TestFlagSuggestionBuild` |
 | 1 | Watch mode | Port ~261 lines into runner | ✅ | ✅ `TestWatchStartsAndWatches` |
 | 9 | Per-test coverage build | Port ~500 lines | ✅ | ✅ `TestCoverageBuild` |
-| 10 | Detailed coverage grouping listing | Port ~100 lines | | |
+| 10 | Detailed coverage grouping listing | Port ~100 lines | ✅ | ✅ `TestListCoverage` |
 | 11 | Misplaced filter false positive after `--` | Bug in validate.go | ✅ | ✅ `TestFilterAfterDashDashIsNotMisplaced` |
 
 ---
