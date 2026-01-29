@@ -1,13 +1,13 @@
 //go:build unix
 
-package main
+package runner
 
 import (
 	"os/exec"
 	"syscall"
 )
 
-// setupProcessGroup configures the command to run in its own process group
+// setupProcessGroup configures the command to run in its own process group.
 func setupProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

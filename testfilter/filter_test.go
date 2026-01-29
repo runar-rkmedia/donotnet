@@ -1,4 +1,4 @@
-package main
+package testfilter
 
 import (
 	"os"
@@ -171,6 +171,37 @@ func TestGetFilterWithCoverage_TestFileOnly(t *testing.T) {
 	}
 }
 
+func TestGetFilterWithCoverage_MixedChanges(t *testing.T) {
+	// When both test files and source files change
+	covMap := &TestCoverageMap{
+		Project: "MyLib.Tests",
+		FileToTests: map[string][]string{
+			"src/MyLib/Service.cs": {"MyLib.Tests.ServiceTests.TestMethod1"},
+		},
+	}
+
+	tf := NewTestFilter()
+	tf.SetCoverageMaps(map[string]*TestCoverageMap{
+		"MyLib.Tests": covMap,
+	})
+
+	// Add both a source file and a test file
+	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Service.cs")
+	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "tests/MyLib.Tests/OtherTests.cs")
+
+	// Get filter
+	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
+
+	if !result.CanFilter {
+		t.Errorf("expected CanFilter=true for mixed changes with coverage, got false. Reason: %s", result.Reason)
+	}
+
+	// Should include both the coverage-based test AND the test class from the test file change
+	if len(result.TestClasses) < 2 {
+		t.Errorf("expected at least 2 test classes, got %d: %v", len(result.TestClasses), result.TestClasses)
+	}
+}
+
 func TestParseHeuristics(t *testing.T) {
 	// Test "default" - only default heuristics
 	h := ParseHeuristics("default")
@@ -337,222 +368,6 @@ func TestGetFilterWithHeuristics_DirectoryNamespace(t *testing.T) {
 	}
 }
 
-func TestGetFilterWithCoverage_MixedChanges(t *testing.T) {
-	// When both test files and source files change
-	covMap := &TestCoverageMap{
-		Project: "MyLib.Tests",
-		FileToTests: map[string][]string{
-			"src/MyLib/Service.cs": {"MyLib.Tests.ServiceTests.TestMethod1"},
-		},
-	}
-
-	tf := NewTestFilter()
-	tf.SetCoverageMaps(map[string]*TestCoverageMap{
-		"MyLib.Tests": covMap,
-	})
-
-	// Add both a source file and a test file
-	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "src/MyLib/Service.cs")
-	tf.AddChangedFile("tests/MyLib.Tests/MyLib.Tests.csproj", "tests/MyLib.Tests/OtherTests.cs")
-
-	// Get filter
-	result := tf.GetFilter("tests/MyLib.Tests/MyLib.Tests.csproj", "/tmp/gitroot", "")
-
-	if !result.CanFilter {
-		t.Errorf("expected CanFilter=true for mixed changes with coverage, got false. Reason: %s", result.Reason)
-	}
-
-	// Should include both the coverage-based test AND the test class from the test file change
-	if len(result.TestClasses) < 2 {
-		t.Errorf("expected at least 2 test classes, got %d: %v", len(result.TestClasses), result.TestClasses)
-	}
-}
-
-func TestIsSafeTestFile_HelperName(t *testing.T) {
-	// Create a temp directory with a test helper file
-	tmpDir := t.TempDir()
-
-	// Create a file with "Helper" in the name
-	helperFile := filepath.Join(tmpDir, "TestHelper.cs")
-	helperContent := `
-using NUnit.Framework;
-public class TestHelper {
-    [Test]
-    public void SomeTest() { }
-}
-`
-	os.WriteFile(helperFile, []byte(helperContent), 0644)
-
-	result := IsSafeTestFile(helperFile, tmpDir)
-
-	if result.IsSafe {
-		t.Errorf("expected file with 'Helper' in name to be unsafe, got safe")
-	}
-	if !strings.Contains(result.Reason, "helper") && !strings.Contains(result.Reason, "Helper") {
-		t.Errorf("expected reason to mention helper, got: %s", result.Reason)
-	}
-}
-
-func TestIsSafeTestFile_NoTestMethods(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create a file without test methods (just a class with no tests)
-	noTestFile := filepath.Join(tmpDir, "ServiceTests.cs")
-	noTestContent := `
-public class ServiceTests {
-    protected void SetupSomething() { }
-}
-`
-	os.WriteFile(noTestFile, []byte(noTestContent), 0644)
-
-	result := IsSafeTestFile(noTestFile, tmpDir)
-
-	if result.IsSafe {
-		t.Errorf("expected file without test methods to be unsafe, got safe")
-	}
-	if !strings.Contains(result.Reason, "no test methods") {
-		t.Errorf("expected reason to mention no test methods, got: %s", result.Reason)
-	}
-}
-
-func TestIsSafeTestFile_WithTestMethods(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create a proper test file
-	testFile := filepath.Join(tmpDir, "ServiceTests.cs")
-	testContent := `
-using NUnit.Framework;
-public class ServiceTests {
-    [Test]
-    public void TestSomething() { }
-}
-`
-	os.WriteFile(testFile, []byte(testContent), 0644)
-
-	result := IsSafeTestFile(testFile, tmpDir)
-
-	if !result.IsSafe {
-		t.Errorf("expected test file with test methods to be safe, got unsafe. Reason: %s", result.Reason)
-	}
-}
-
-func TestIsSafeTestFile_ReferencedByOther(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create a base test class
-	baseFile := filepath.Join(tmpDir, "IntegrationTests.cs")
-	baseContent := `
-using NUnit.Framework;
-public class IntegrationTests {
-    [Test]
-    public void TestIntegration() { }
-}
-`
-	os.WriteFile(baseFile, []byte(baseContent), 0644)
-
-	// Create another test file that references the base class
-	otherFile := filepath.Join(tmpDir, "ServiceIntegrationTests.cs")
-	otherContent := `
-using NUnit.Framework;
-public class ServiceIntegrationTests : IntegrationTests {
-    [Test]
-    public void TestService() { }
-}
-`
-	os.WriteFile(otherFile, []byte(otherContent), 0644)
-
-	result := IsSafeTestFile(baseFile, tmpDir)
-
-	if result.IsSafe {
-		t.Errorf("expected file referenced by other test file to be unsafe, got safe")
-	}
-	if !strings.Contains(result.Reason, "referenced") {
-		t.Errorf("expected reason to mention referenced, got: %s", result.Reason)
-	}
-}
-
-func TestGetTestClassName(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"Namespace.ClassName.MethodName", "Namespace.ClassName"},
-		{"Namespace.SubNs.ClassName.MethodName", "Namespace.SubNs.ClassName"},
-		{"Namespace.ClassName.MethodName(param1)", "Namespace.ClassName"},
-		{"ClassName.MethodName", "ClassName"},
-		{"MethodName", "MethodName"}, // edge case: no dots
-	}
-
-	for _, tc := range tests {
-		result := getTestClassName(tc.input)
-		if result != tc.expected {
-			t.Errorf("getTestClassName(%q) = %q, expected %q", tc.input, result, tc.expected)
-		}
-	}
-}
-
-func TestGroupTestsByClass(t *testing.T) {
-	tests := []string{
-		"Namespace.FooTests.TestA",
-		"Namespace.FooTests.TestB",
-		"Namespace.BarTests.TestC",
-		"Namespace.FooTests.TestD(param)",
-	}
-
-	groups := groupTestsByClass(tests)
-
-	// Should have 2 groups: FooTests and BarTests
-	if len(groups) != 2 {
-		t.Errorf("expected 2 groups, got %d", len(groups))
-	}
-
-	// Find FooTests group
-	var fooGroup *testGroup
-	for i := range groups {
-		if groups[i].name == "Namespace.FooTests" {
-			fooGroup = &groups[i]
-			break
-		}
-	}
-
-	if fooGroup == nil {
-		t.Fatal("FooTests group not found")
-	}
-
-	// FooTests should have 3 tests (TestD with param is still in FooTests)
-	if len(fooGroup.tests) != 3 {
-		t.Errorf("expected FooTests to have 3 tests, got %d: %v", len(fooGroup.tests), fooGroup.tests)
-	}
-
-	// Filter should use tilde for partial match
-	if !strings.Contains(fooGroup.filter, "FullyQualifiedName~Namespace.FooTests") {
-		t.Errorf("expected filter to contain partial match, got: %s", fooGroup.filter)
-	}
-}
-
-func TestParseCoverageGranularity(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected CoverageGranularity
-	}{
-		{"method", CoverageGranularityMethod},
-		{"METHOD", CoverageGranularityMethod},
-		{"class", CoverageGranularityClass},
-		{"CLASS", CoverageGranularityClass},
-		{"file", CoverageGranularityFile},
-		{"FILE", CoverageGranularityFile},
-		{"invalid", CoverageGranularityMethod}, // default
-		{"", CoverageGranularityMethod},        // default
-	}
-
-	for _, tc := range tests {
-		result := ParseCoverageGranularity(tc.input)
-		if result != tc.expected {
-			t.Errorf("ParseCoverageGranularity(%q) = %v, expected %v", tc.input, result, tc.expected)
-		}
-	}
-}
-
 func TestExtractCategoryTraitsFromContent(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -712,11 +527,11 @@ func TestAreAllTraitsExcluded(t *testing.T) {
 
 func TestAreAllTestsExcludedInFile(t *testing.T) {
 	tests := []struct {
-		name              string
-		content           string
+		name               string
+		content            string
 		excludedCategories []string
-		expectExcluded    bool
-		expectTestCount   int
+		expectExcluded     bool
+		expectTestCount    int
 	}{
 		{
 			name: "class-level trait excludes all methods",
@@ -890,5 +705,102 @@ public class LiveTests {
 				t.Errorf("expected testCount=%d, got %d", tc.expectTestCount, testCount)
 			}
 		})
+	}
+}
+
+func TestIsSafeTestFile_HelperName(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	helperFile := filepath.Join(tmpDir, "TestHelper.cs")
+	helperContent := `
+using NUnit.Framework;
+public class TestHelper {
+    [Test]
+    public void SomeTest() { }
+}
+`
+	os.WriteFile(helperFile, []byte(helperContent), 0644)
+
+	result := IsSafeTestFile(helperFile, tmpDir)
+
+	if result.IsSafe {
+		t.Errorf("expected file with 'Helper' in name to be unsafe, got safe")
+	}
+	if !strings.Contains(result.Reason, "helper") && !strings.Contains(result.Reason, "Helper") {
+		t.Errorf("expected reason to mention helper, got: %s", result.Reason)
+	}
+}
+
+func TestIsSafeTestFile_NoTestMethods(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	noTestFile := filepath.Join(tmpDir, "ServiceTests.cs")
+	noTestContent := `
+public class ServiceTests {
+    protected void SetupSomething() { }
+}
+`
+	os.WriteFile(noTestFile, []byte(noTestContent), 0644)
+
+	result := IsSafeTestFile(noTestFile, tmpDir)
+
+	if result.IsSafe {
+		t.Errorf("expected file without test methods to be unsafe, got safe")
+	}
+	if !strings.Contains(result.Reason, "no test methods") {
+		t.Errorf("expected reason to mention no test methods, got: %s", result.Reason)
+	}
+}
+
+func TestIsSafeTestFile_WithTestMethods(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	testFile := filepath.Join(tmpDir, "ServiceTests.cs")
+	testContent := `
+using NUnit.Framework;
+public class ServiceTests {
+    [Test]
+    public void TestSomething() { }
+}
+`
+	os.WriteFile(testFile, []byte(testContent), 0644)
+
+	result := IsSafeTestFile(testFile, tmpDir)
+
+	if !result.IsSafe {
+		t.Errorf("expected test file with test methods to be safe, got unsafe. Reason: %s", result.Reason)
+	}
+}
+
+func TestIsSafeTestFile_ReferencedByOther(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	baseFile := filepath.Join(tmpDir, "IntegrationTests.cs")
+	baseContent := `
+using NUnit.Framework;
+public class IntegrationTests {
+    [Test]
+    public void TestIntegration() { }
+}
+`
+	os.WriteFile(baseFile, []byte(baseContent), 0644)
+
+	otherFile := filepath.Join(tmpDir, "ServiceIntegrationTests.cs")
+	otherContent := `
+using NUnit.Framework;
+public class ServiceIntegrationTests : IntegrationTests {
+    [Test]
+    public void TestService() { }
+}
+`
+	os.WriteFile(otherFile, []byte(otherContent), 0644)
+
+	result := IsSafeTestFile(baseFile, tmpDir)
+
+	if result.IsSafe {
+		t.Errorf("expected file referenced by other test file to be unsafe, got safe")
+	}
+	if !strings.Contains(result.Reason, "referenced") {
+		t.Errorf("expected reason to mention referenced, got: %s", result.Reason)
 	}
 }

@@ -102,3 +102,7 @@ donotnet
 
 ### GoReleaser ###
 dist/
+
+### .NET build artifacts (e2e fixture) ###
+e2e/testdata/**/bin/
+e2e/testdata/**/obj/

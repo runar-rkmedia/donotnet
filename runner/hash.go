@@ -1,4 +1,4 @@
-package main
+package runner
 
 import (
 	"crypto/sha256"
@@ -12,7 +12,16 @@ import (
 	ignore "github.com/sabhiram/go-gitignore"
 )
 
-// isNonBuildFile returns true for files that don't affect the build
+// HashArgs creates a hash of command arguments for cache keys.
+func HashArgs(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	h := sha256.Sum256([]byte(strings.Join(args, "\x00")))
+	return fmt.Sprintf("%x", h[:8])
+}
+
+// isNonBuildFile returns true for files that don't affect the build.
 func isNonBuildFile(name string) bool {
 	lower := strings.ToLower(name)
 	// Documentation and readme files
@@ -33,8 +42,8 @@ func isNonBuildFile(name string) bool {
 	return false
 }
 
-// computeContentHash computes a hash of all source files in the given directories
-func computeContentHash(root string, dirs []string) string {
+// ComputeContentHash computes a hash of all source files in the given directories.
+func ComputeContentHash(root string, dirs []string) string {
 	h := sha256.New()
 
 	// Try to load .gitignore from root
@@ -107,9 +116,9 @@ func computeContentHash(root string, dirs []string) string {
 	return fmt.Sprintf("%x", h.Sum(nil)[:8])
 }
 
-// canSkipRestore checks if --no-restore can be safely used
+// canSkipRestore checks if --no-restore can be safely used.
 // Returns true if obj/project.assets.json exists and is newer than
-// any .csproj file in the project or its transitive dependencies
+// any .csproj file in the project or its transitive dependencies.
 func canSkipRestore(projectPath string, relevantDirs []string) bool {
 	projectDir := filepath.Dir(projectPath)
 	assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
@@ -144,9 +153,9 @@ func canSkipRestore(projectPath string, relevantDirs []string) bool {
 	return true
 }
 
-// canSkipBuild checks if --no-build can be safely used
+// canSkipBuild checks if --no-build can be safely used.
 // Returns true if output DLL exists and is newer than all source files
-// in the project AND all its transitive dependencies
+// in the project AND all its transitive dependencies.
 func canSkipBuild(projectPath string, relevantDirs []string) bool {
 	projectDir := filepath.Dir(projectPath)
 	projectName := strings.TrimSuffix(filepath.Base(projectPath), ".csproj")
@@ -176,7 +185,6 @@ func canSkipBuild(projectPath string, relevantDirs []string) bool {
 	}
 
 	// Check if any source file in any relevant directory is newer than the DLL
-	// This includes the project's own directory AND all transitive dependencies
 	newerSourceFound := false
 	for _, dir := range relevantDirs {
 		if newerSourceFound {
@@ -213,4 +221,14 @@ func canSkipBuild(projectPath string, relevantDirs []string) bool {
 	}
 
 	return !newerSourceFound
+}
+
+// sortedKeys returns sorted keys of a map.
+func sortedKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

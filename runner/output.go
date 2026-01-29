@@ -1,4 +1,4 @@
-package main
+package runner
 
 import (
 	"bytes"
@@ -9,12 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/term"
 )
 
-// runResult holds the result of running a dotnet command on a project
+// runResult holds the result of running a dotnet command on a project.
 type runResult struct {
-	project         *Project
+	project         *project.Project
 	success         bool
 	output          string
 	duration        time.Duration
@@ -27,15 +28,15 @@ type runResult struct {
 	skippedByFilter bool     // true if all tests were excluded by user's category filter
 }
 
-// statusUpdate is sent from workers to update the status line
+// statusUpdate is sent from workers to update the status line.
 type statusUpdate struct {
-	project *Project
+	project *project.Project
 	line    string
 }
 
-// statusLineWriter captures output and optionally streams it to the terminal
+// statusLineWriter captures output and optionally streams it to the terminal.
 type statusLineWriter struct {
-	project    *Project
+	project    *project.Project
 	status     chan<- statusUpdate
 	buffer     *bytes.Buffer
 	lineBuf    []byte
@@ -169,7 +170,7 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-// prettyPrintFilter prints a test filter in a readable format
+// prettyPrintFilter prints a test filter in a readable format.
 func prettyPrintFilter(projectName, filter string) {
 	// Parse filter: "FullyQualifiedName~Foo|FullyQualifiedName~Bar" -> ["Foo", "Bar"]
 	parts := strings.Split(filter, "|")
@@ -200,7 +201,7 @@ func prettyPrintFilter(projectName, filter string) {
 	}
 }
 
-// needsRestoreRetry checks if dotnet output indicates a restore is needed
+// needsRestoreRetry checks if dotnet output indicates a restore is needed.
 func needsRestoreRetry(output string) bool {
 	// Common patterns indicating restore is needed
 	restorePatterns := []string{

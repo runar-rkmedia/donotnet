@@ -339,3 +339,45 @@ func Summary(succeeded, total, cached int, duration time.Duration, success bool)
 func SkipIndicator(skippedBuild, skippedRestore bool) string {
 	return Default.SkipIndicator(skippedBuild, skippedRestore)
 }
+
+// Stdout returns os.Stdout for direct writing (e.g., JSON output)
+func Stdout() io.Writer {
+	return os.Stdout
+}
+
+// ColorMode represents terminal color modes
+type ColorMode int
+
+const (
+	ColorModeAuto   ColorMode = iota // auto-detect based on TTY
+	ColorModeAlways                  // always use colors
+	ColorModeNever                   // never use colors
+)
+
+// SetColorMode sets the color mode for the terminal
+func SetColorMode(mode ColorMode) {
+	switch mode {
+	case ColorModeAlways:
+		Default.SetPlain(false)
+	case ColorModeNever:
+		Default.SetPlain(true)
+	case ColorModeAuto:
+		Default.SetPlain(!Default.IsTTY())
+	}
+}
+
+// quiet mode state
+var quietMode bool
+
+// SetQuiet enables or disables quiet mode
+func SetQuiet(q bool) {
+	quietMode = q
+	if q {
+		Default.SetProgress(false)
+	}
+}
+
+// IsQuiet returns whether quiet mode is enabled
+func IsQuiet() bool {
+	return quietMode
+}

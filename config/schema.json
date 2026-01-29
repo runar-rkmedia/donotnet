@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/runar-rkmedia/donotnet/config/schema.json",
+  "title": "donotnet configuration",
+  "description": "Configuration file for donotnet - fast affected project detection for .NET",
+  "type": "object",
+  "properties": {
+    "verbose": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable verbose output"
+    },
+    "parallel": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Number of parallel workers (0 = auto, uses GOMAXPROCS)"
+    },
+    "color": {
+      "type": "string",
+      "enum": ["auto", "always", "never"],
+      "default": "auto",
+      "description": "Color output mode"
+    },
+    "show_cached": {
+      "type": "boolean",
+      "default": false,
+      "description": "Show cached projects in output"
+    },
+    "local": {
+      "type": "boolean",
+      "default": false,
+      "description": "Only scan current directory, not entire git repo"
+    },
+    "keep_going": {
+      "type": "boolean",
+      "default": false,
+      "description": "Keep going on errors (don't stop on first failure)"
+    },
+    "quiet": {
+      "type": "boolean",
+      "default": false,
+      "description": "Quiet mode - suppress progress output"
+    },
+    "no_progress": {
+      "type": "boolean",
+      "default": false,
+      "description": "Disable progress output"
+    },
+    "no_suggestions": {
+      "type": "boolean",
+      "default": false,
+      "description": "Disable performance suggestions"
+    },
+    "cache_dir": {
+      "type": "string",
+      "default": "",
+      "description": "Cache directory path (default: .donotnet in git root)"
+    },
+    "test": {
+      "type": "object",
+      "description": "Test command settings",
+      "properties": {
+        "heuristics": {
+          "type": "string",
+          "default": "default",
+          "description": "Test filter heuristics: default, none, or comma-separated names"
+        },
+        "coverage": {
+          "type": "boolean",
+          "default": false,
+          "description": "Collect code coverage during test runs"
+        },
+        "coverage_granularity": {
+          "type": "string",
+          "enum": ["method", "class", "file"],
+          "default": "class",
+          "description": "Coverage map granularity"
+        },
+        "staleness_check": {
+          "type": "string",
+          "enum": ["git", "mtime", "both"],
+          "default": "git",
+          "description": "Coverage staleness check method"
+        },
+        "reports": {
+          "type": "boolean",
+          "default": true,
+          "description": "Save test reports (TRX and console output)"
+        },
+        "failed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Only run previously failed tests"
+        }
+      },
+      "additionalProperties": false
+    },
+    "build": {
+      "type": "object",
+      "description": "Build command settings",
+      "properties": {
+        "solution": {
+          "type": "string",
+          "enum": ["auto", "always", "never"],
+          "default": "auto",
+          "description": "Solution-level build mode"
+        },
+        "full_build": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable auto --no-build/--no-restore detection"
+        }
+      },
+      "additionalProperties": false
+    },
+    "vcs": {
+      "type": "object",
+      "description": "Version control settings",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "default": "",
+          "description": "Default ref to compare against (empty = disabled)"
+        },
+        "changed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Always use vcs-changed mode (only uncommitted changes)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "watch": {
+      "type": "object",
+      "description": "Watch mode settings",
+      "properties": {
+        "debounce_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 100,
+          "description": "Debounce time in milliseconds"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

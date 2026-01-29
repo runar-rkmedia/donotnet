@@ -15,7 +15,12 @@ func FindRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return FindRootFrom(dir)
+}
 
+// FindRootFrom finds the root of the git repository by walking up from the given directory.
+func FindRootFrom(dir string) (string, error) {
+	dir = filepath.Clean(dir)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			return dir, nil

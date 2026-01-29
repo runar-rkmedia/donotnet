@@ -1,9 +1,25 @@
-package main
+package cmd
 
 import (
 	"runtime/debug"
 	"strings"
+
+	"github.com/runar-rkmedia/donotnet/term"
+	"github.com/spf13/cobra"
 )
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Show version and build info",
+	Long:  `Display version information including git revision and build time.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		term.Println(versionString())
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(versionCmd)
+}
 
 func getBuildInfo() (version, vcsRevision, vcsTime, vcsModified string) {
 	version = "dev"
