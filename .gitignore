@@ -103,6 +103,10 @@ donotnet
 ### GoReleaser ###
 dist/
 
+### E2E coverage ###
+coverage-e2e.txt
+coverage-e2e.html
+
 ### .NET build artifacts (e2e fixture) ###
 e2e/testdata/**/bin/
 e2e/testdata/**/obj/

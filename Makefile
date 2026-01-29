@@ -38,8 +38,16 @@ bump: check-clean
 	git commit --amend
 	$(MAKE) tag
 
+test-e2e:
+	DONOTNET_COMPARE=1 go test ./e2e -v -count=1
+
+coverage-e2e: test-e2e
+	go tool cover -html=e2e/coverage-e2e.txt -o e2e/coverage-e2e.html
+	@echo "Coverage report: e2e/coverage-e2e.html"
+
 clean:
 	rm -f $(BINARY_NAME)
 	rm -rf dist/
+	rm -f e2e/coverage-e2e.txt e2e/coverage-e2e.html
 
-.PHONY: dev test build lint audit release bump tag clean check-clean CHANGELOG.md
+.PHONY: dev test test-e2e coverage-e2e build lint audit release bump tag clean check-clean CHANGELOG.md

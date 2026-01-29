@@ -29,7 +29,7 @@ func runCLI(t *testing.T, binary, workDir string, args ...string) *cliResult {
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb")
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb", "GOCOVERDIR="+goCoverDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -169,7 +169,7 @@ func runCLIWaitFor(t *testing.T, binary, workDir string, waitFor string, timeout
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb")
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb", "GOCOVERDIR="+goCoverDir)
 
 	var stdout, stderr syncBuffer
 	cmd.Stdout = &stdout

@@ -14,6 +14,7 @@ var (
 	binaryPath     string
 	mainBinaryPath string
 	repoRoot       string
+	goCoverDir     string
 )
 
 func TestMain(m *testing.M) {
@@ -25,9 +26,16 @@ func TestMain(m *testing.M) {
 	}
 	repoRoot = filepath.Dir(wd)
 
-	// Build current branch binary
+	// Create coverage directory for integration test profiles
+	goCoverDir, err = os.MkdirTemp("", "donotnet-e2e-cover-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create coverage temp dir: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Build current branch binary with coverage instrumentation
 	binaryPath = filepath.Join(wd, "donotnet-test")
-	cmd := exec.Command("go", "build", "-o", binaryPath, ".")
+	cmd := exec.Command("go", "build", "-cover", "-o", binaryPath, ".")
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to build donotnet binary: %v\n%s\n", err, out)
@@ -60,6 +68,16 @@ func TestMain(m *testing.M) {
 	}
 
 	code := m.Run()
+
+	// Convert coverage data to text format
+	coverOut := filepath.Join(wd, "coverage-e2e.txt")
+	covCmd := exec.Command("go", "tool", "covdata", "textfmt", "-i="+goCoverDir, "-o="+coverOut)
+	if out, covErr := covCmd.CombinedOutput(); covErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to convert coverage data: %v\n%s\n", covErr, out)
+	} else {
+		fmt.Fprintf(os.Stderr, "e2e coverage written to %s\n", coverOut)
+	}
+	os.RemoveAll(goCoverDir)
 
 	os.Remove(binaryPath)
 	if mainBinaryPath != "" {
