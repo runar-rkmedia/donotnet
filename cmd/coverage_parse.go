@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"sort"
 
 	"github.com/runar-rkmedia/donotnet/coverage"
 	"github.com/runar-rkmedia/donotnet/term"
@@ -38,6 +39,9 @@ var coverageParseCmd = &cobra.Command{
 		for f := range report.AllFiles {
 			output.AllFiles = append(output.AllFiles, f)
 		}
+
+		sort.Strings(output.CoveredFiles)
+		sort.Strings(output.AllFiles)
 
 		enc := json.NewEncoder(term.Stdout())
 		enc.SetIndent("", "  ")

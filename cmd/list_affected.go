@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/runar-rkmedia/donotnet/cache"
+	"github.com/runar-rkmedia/donotnet/git"
 	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/runner"
 	"github.com/runar-rkmedia/donotnet/term"
@@ -12,7 +13,8 @@ import (
 )
 
 var (
-	listAffectedType string
+	listAffectedType   string
+	listAffectedVcsRef string
 )
 
 var listAffectedCmd = &cobra.Command{
@@ -30,6 +32,17 @@ Projects can be filtered by type:
 			return err
 		}
 
+		// Use uncommitted changes to determine affected projects,
+		// matching the old behavior where list-affected implied VCS-changed mode.
+		vcsChangedFiles := git.GetDirtyFiles(scan.GitRoot)
+		if listAffectedVcsRef != "" {
+			vcsChangedFiles, err = git.GetChangedFiles(scan.GitRoot, listAffectedVcsRef)
+			if err != nil {
+				return err
+			}
+		}
+		useVcsFilter := len(vcsChangedFiles) > 0
+
 		// Open cache to find changed projects
 		cacheDir := ""
 		if cfg != nil && cfg.CacheDir != "" {
@@ -46,10 +59,18 @@ Projects can be filtered by type:
 		}
 		defer db.Close()
 
-		// Find changed projects by checking cache
+		// Find changed projects by checking cache + VCS filter
 		argsHash := runner.HashArgs([]string{"test"})
 		changed := make(map[string]bool)
 		for _, p := range scan.Projects {
+			if useVcsFilter {
+				relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
+				projectVcsFiles := project.FilterFilesToProject(vcsChangedFiles, relevantDirs)
+				if len(projectVcsFiles) == 0 {
+					continue
+				}
+			}
+
 			relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
 			contentHash := runner.ComputeContentHash(scan.GitRoot, relevantDirs)
 			key := cache.MakeKey(contentHash, argsHash, p.Path)
@@ -76,7 +97,7 @@ Projects can be filtered by type:
 				}
 			}
 			count++
-			term.Println(p.Name)
+			term.Println(p.Path)
 		}
 
 		if count == 0 {
@@ -89,5 +110,6 @@ Projects can be filtered by type:
 
 func init() {
 	listAffectedCmd.Flags().StringVarP(&listAffectedType, "type", "t", "all", "Filter by type: all, tests, non-tests")
+	listAffectedCmd.Flags().StringVar(&listAffectedVcsRef, "vcs-ref", "", "Compare against a git ref (e.g., main, HEAD~3) instead of uncommitted changes")
 	listCmd.AddCommand(listAffectedCmd)
 }

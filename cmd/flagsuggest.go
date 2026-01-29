@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/runar-rkmedia/donotnet/term"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -54,7 +55,8 @@ func flagErrorWithSuggestion(cmd *cobra.Command, err error) error {
 	})
 
 	if bestName != "" {
-		return fmt.Errorf("%w\n\nDid you mean: --%s?", err, bestName)
+		return fmt.Errorf("%w\n\nDid you mean: %s--%s%s?", err,
+			term.Color(term.ColorGreen), bestName, term.Color(term.ColorReset))
 	}
 	return err
 }

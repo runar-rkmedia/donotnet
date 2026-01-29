@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/runar-rkmedia/donotnet/cache"
+	"github.com/runar-rkmedia/donotnet/project"
+	"github.com/runar-rkmedia/donotnet/runner"
 	"github.com/runar-rkmedia/donotnet/term"
 	"github.com/spf13/cobra"
 )
@@ -33,9 +35,12 @@ for matching project paths.`,
 		}
 		defer db.Close()
 
+		// Load project scan for computing current content hashes
+		scan, scanErr := scanProjects()
+
 		var found bool
 		err = db.View(func(key string, entry cache.Entry) error {
-			_, _, projectPath := cache.ParseKey(key)
+			contentHash, argsHash, projectPath := cache.ParseKey(key)
 			projectName := filepath.Base(filepath.Dir(projectPath))
 
 			// Match by name or path substring
@@ -44,16 +49,37 @@ for matching project paths.`,
 			}
 
 			found = true
-			status := "PASS"
+			status := term.ColorGreen + "PASS" + term.ColorReset
 			if !entry.Success {
-				status = "FAIL"
+				status = term.ColorRed + "FAIL" + term.ColorReset
 			}
 
-			term.Printf("Project: %s\n", projectPath)
-			term.Printf("Status:  %s\n", status)
-			term.Printf("Args:    %s\n", entry.Args)
-			term.Printf("Last run: %s\n", time.Unix(entry.LastRun, 0).Format(time.RFC3339))
+			term.Printf("Project:      %s\n", projectPath)
+			term.Printf("Cache key:    %s\n", key)
+			term.Printf("Content hash: %s\n", contentHash)
+			term.Printf("Args hash:    %s\n", argsHash)
+			term.Printf("Status:       %s\n", status)
+			term.Printf("Args:         %s\n", entry.Args)
+			term.Printf("Last run:     %s\n", time.Unix(entry.LastRun, 0).Format(time.RFC3339))
+
+			// Show current content hash comparison if we have scan data
+			if scanErr == nil && scan != nil {
+				for _, p := range scan.Projects {
+					if p.Path == projectPath {
+						relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
+						currentHash := runner.ComputeContentHash(scan.GitRoot, relevantDirs)
+						match := term.ColorGreen + "match" + term.ColorReset
+						if currentHash != contentHash {
+							match = term.ColorYellow + "changed" + term.ColorReset
+						}
+						term.Printf("Current hash: %s (%s)\n", currentHash, match)
+						break
+					}
+				}
+			}
+
 			if len(entry.Output) > 0 {
+				term.Printf("Output size:  %d bytes\n", len(entry.Output))
 				term.Printf("\n--- Output ---\n%s\n", string(entry.Output))
 			} else {
 				term.Dim("(no output stored)")
