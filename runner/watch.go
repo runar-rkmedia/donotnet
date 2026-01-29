@@ -26,15 +26,9 @@ var relevantExtensions = map[string]bool{
 	".targets": true,
 }
 
-// runWatch runs in watch mode: an initial run followed by re-runs on file changes.
+// runWatch sets up file watchers and re-runs on file changes.
+// The initial run is handled by Run() before calling this.
 func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsHash string) error {
-	// Initial run
-	if len(targets) > 0 {
-		r.runProjects(ctx, targets, nil, argsHash)
-	} else {
-		term.Dim("No affected projects to %s", r.opts.Command)
-	}
-
 	// Build coverage map for test project selection
 	var covMap *coverage.Map
 	if r.opts.Command == "test" {
