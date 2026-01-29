@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 var (
@@ -462,6 +463,18 @@ func TestFailedFlag(t *testing.T) {
 	r = runCLI(t, binaryPath, dir, "test", "--failed", "--force")
 	assertExit(t, r, 0)
 	assertContains(t, r, "failed")
+}
+
+// --- Watch mode ---
+
+func TestWatchStartsAndWatches(t *testing.T) {
+	needsDotnet(t)
+	dir := setupFixtureWithGit(t)
+
+	// Start watch mode, wait for it to print "Watching", then kill it.
+	// Fails if the message doesn't appear within 30s.
+	r := runCLIWaitFor(t, binaryPath, dir, "Watching", 30*time.Second, "test", "--force", "--watch")
+	assertContains(t, r, "directories")
 }
 
 // --- Untested project detection ---

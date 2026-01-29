@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -156,6 +157,77 @@ func needsCompare(t *testing.T) {
 	if mainBinaryPath == "" {
 		t.Skip("main branch binary not built (set DONOTNET_COMPARE=1 to enable)")
 	}
+}
+
+// runCLIWaitFor starts the binary, waits until the combined output contains waitFor,
+// then kills the process and returns the captured output.
+// If the text doesn't appear within timeout, the test fails.
+func runCLIWaitFor(t *testing.T, binary, workDir string, waitFor string, timeout time.Duration, args ...string) *cliResult {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb")
+
+	var stdout, stderr syncBuffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start %s: %v", binary, err)
+	}
+
+	// Poll for the expected text
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	found := false
+	for !found {
+		select {
+		case <-deadline:
+			cancel()
+			_ = cmd.Wait()
+			t.Fatalf("timed out waiting for %q in output.\nstdout: %s\nstderr: %s",
+				waitFor, stdout.String(), stderr.String())
+		case <-ticker.C:
+			if strings.Contains(stdout.String()+stderr.String(), waitFor) {
+				found = true
+			}
+		}
+	}
+
+	cancel()
+	_ = cmd.Wait()
+	duration := time.Since(start)
+
+	return &cliResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: 0,
+		Duration: duration,
+	}
+}
+
+// syncBuffer is a goroutine-safe bytes.Buffer for capturing concurrent writes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // setupFixtureWithGit copies the fixture and initializes a git repo.

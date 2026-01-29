@@ -137,11 +137,11 @@ Ordered by effort (trivial → medium). Check off as completed.
 
 | # | Feature | Nature of gap | Implemented | Tested |
 |---|---------|--------------|:-----------:|:------:|
-| 7 | Auto `--print-output` for `--list-tests` | 1 line omission | ✅ | |
-| 5 | `--print-output` cache miss | 2 line omission | ✅ | |
-| 3 | Untested project detection | ~30 lines wiring | ✅ | |
-| 2 | `--failed` flag | ~50 lines wiring + port helper | ✅ | |
-| 6 | Misplaced dotnet flag hint | ~10 lines in cobra cmd | ✅ | |
-| 4 | Suggestions system | Port ~100 lines + 3 call sites | ✅ | |
-| 8 | Did-you-mean for flags | Verify cobra, possibly ~10 lines | ✅ | |
-| 1 | Watch mode | Port ~261 lines into runner | ✅ | |
+| 7 | Auto `--print-output` for `--list-tests` | 1 line omission | ✅ | ✅ `TestPrintOutput` |
+| 5 | `--print-output` cache miss | 2 line omission | ✅ | ✅ `TestPrintOutput` |
+| 3 | Untested project detection | ~30 lines wiring | ✅ | ✅ `TestUntestedProjectWarning` |
+| 2 | `--failed` flag | ~50 lines wiring + port helper | ✅ | ✅ `TestFailedFlag` |
+| 6 | Misplaced dotnet flag hint | ~10 lines in cobra cmd | ✅ | ✅ `TestMisplacedFilterHint` |
+| 4 | Suggestions system | Port ~100 lines + 3 call sites | ✅ | ✅ `TestSuggestionsShown`, `TestSuggestionsSuppressed` |
+| 8 | Did-you-mean for flags | Verify cobra, possibly ~10 lines | ✅ | ✅ `TestFlagSuggestion`, `TestFlagSuggestionBuild` |
+| 1 | Watch mode | Port ~261 lines into runner | ✅ | — (interactive, not e2e testable) |
