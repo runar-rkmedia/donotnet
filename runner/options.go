@@ -23,6 +23,7 @@ type Options struct {
 
 	// --- Test-specific options ---
 	Coverage            bool
+	CoverageBuild       bool // Per-test coverage map build (donotnet coverage build)
 	Heuristics          string
 	Failed              bool
 	StalenessCheck      string

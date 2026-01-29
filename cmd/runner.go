@@ -18,6 +18,7 @@ type RunOptions struct {
 
 	// Test-specific options
 	Coverage            bool
+	CoverageBuild       bool
 	Heuristics          string
 	Failed              bool
 	StalenessCheck      string
@@ -53,6 +54,9 @@ func Run(opts *RunOptions) error {
 	// Test options
 	if opts.Coverage {
 		runnerOpts.Coverage = true
+	}
+	if opts.CoverageBuild {
+		runnerOpts.CoverageBuild = true
 	}
 	if opts.Heuristics != "" {
 		runnerOpts.Heuristics = opts.Heuristics

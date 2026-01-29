@@ -23,7 +23,7 @@ Granularity levels:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := &RunOptions{
 			Command:             "test",
-			Coverage:            true,
+			CoverageBuild:       true,
 			CoverageGranularity: coverageBuildGranularity,
 			Force:               IsForce(),
 			Config:              GetConfig(),

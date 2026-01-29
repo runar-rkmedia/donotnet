@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/runar-rkmedia/donotnet/cache"
+	"github.com/runar-rkmedia/donotnet/coverage"
 	"github.com/runar-rkmedia/donotnet/git"
 	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/suggestions"
@@ -111,6 +112,28 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.projectsByPath = make(map[string]*project.Project)
 	for _, p := range r.projects {
 		r.projectsByPath[p.Path] = p
+	}
+
+	// Handle per-test coverage build (separate flow from normal test/build)
+	if r.opts.CoverageBuild {
+		var testProjects []*project.Project
+		for _, p := range r.projects {
+			if p.IsTest {
+				testProjects = append(testProjects, p)
+			}
+		}
+		if len(testProjects) == 0 {
+			term.Dim("No test projects found")
+			return nil
+		}
+		coverage.BuildPerTestCoverageMaps(coverage.BuildOptions{
+			GitRoot:     r.gitRoot,
+			Projects:    testProjects,
+			MaxJobs:     r.opts.EffectiveParallel(),
+			Granularity: coverage.ParseGranularity(r.opts.CoverageGranularity),
+			Ctx:         ctx,
+		})
+		return nil
 	}
 
 	// Get VCS state
