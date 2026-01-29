@@ -49,7 +49,7 @@ func init() {
 
 func runBuild(cmd *cobra.Command, args []string) error {
 	// Check for misplaced dotnet filter expressions
-	if err := checkForMisplacedDotnetArgs("build", cmd.Flags().Args()); err != nil {
+	if err := checkForMisplacedDotnetArgs("build", cmd.Flags().Args(), args); err != nil {
 		return err
 	}
 

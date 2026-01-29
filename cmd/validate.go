@@ -5,14 +5,16 @@ import (
 	"strings"
 )
 
-// checkForMisplacedDotnetArgs checks if any args look like dotnet flags
-// that should have been placed after the -- separator.
-// In cobra, args passed to RunE are everything after --,
-// but the user might also accidentally pass dotnet-looking args as positional args.
-// This detects patterns like "Category!=Live" that aren't valid donotnet args
-// but look like dotnet filter expressions.
-func checkForMisplacedDotnetArgs(command string, args []string) error {
-	for _, arg := range args {
+// checkForMisplacedDotnetArgs checks if any positional args look like dotnet
+// filter expressions that should have been placed after the -- separator.
+// posArgs are cobra's non-flag args (cmd.Flags().Args()), dashDashArgs are
+// the args after -- (the RunE args parameter). If -- was used, the user
+// intentionally passed args through, so we skip the check.
+func checkForMisplacedDotnetArgs(command string, posArgs []string, dashDashArgs []string) error {
+	if len(dashDashArgs) > 0 {
+		return nil
+	}
+	for _, arg := range posArgs {
 		if looksLikeDotnetFilterExpr(arg) {
 			return fmt.Errorf("%q looks like a dotnet filter expression but was not passed after '--'.\n\nUse: donotnet %s -- --filter %q", arg, command, arg)
 		}

@@ -63,7 +63,7 @@ func init() {
 
 func runTest(cmd *cobra.Command, args []string) error {
 	// Check for misplaced dotnet filter expressions
-	if err := checkForMisplacedDotnetArgs("test", cmd.Flags().Args()); err != nil {
+	if err := checkForMisplacedDotnetArgs("test", cmd.Flags().Args(), args); err != nil {
 		return err
 	}
 

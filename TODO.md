@@ -147,7 +147,7 @@ Ordered by effort (trivial → medium). Check off as completed.
 | 1 | Watch mode | Port ~261 lines into runner | ✅ | ✅ `TestWatchStartsAndWatches` |
 | 9 | Per-test coverage build | Port ~500 lines | | |
 | 10 | Detailed coverage grouping listing | Port ~100 lines | | |
-| 11 | Misplaced filter false positive after `--` | Bug in validate.go | | |
+| 11 | Misplaced filter false positive after `--` | Bug in validate.go | ✅ | ✅ `TestFilterAfterDashDashIsNotMisplaced` |
 
 ---
 

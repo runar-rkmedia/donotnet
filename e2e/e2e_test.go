@@ -337,6 +337,15 @@ func TestMisplacedFilterHint(t *testing.T) {
 	assertContains(t, r, "--")
 }
 
+func TestFilterAfterDashDashIsNotMisplaced(t *testing.T) {
+	needsDotnet(t)
+	dir := setupFixtureWithGit(t)
+
+	// Filter expression after "--" should NOT trigger the misplaced hint
+	r := runCLI(t, binaryPath, dir, "test", "--", "--filter", "Category!=Live")
+	assertNotContains(t, r, "looks like a dotnet filter expression")
+}
+
 // --- Suggestions (parallel test framework) ---
 
 func TestSuggestionsShown(t *testing.T) {
