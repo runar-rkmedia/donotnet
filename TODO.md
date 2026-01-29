@@ -145,6 +145,60 @@ Ordered by effort (trivial → medium). Check off as completed.
 | 4 | Suggestions system | Port ~100 lines + 3 call sites | ✅ | ✅ `TestSuggestionsShown`, `TestSuggestionsSuppressed` |
 | 8 | Did-you-mean for flags | Verify cobra, possibly ~10 lines | ✅ | ✅ `TestFlagSuggestion`, `TestFlagSuggestionBuild` |
 | 1 | Watch mode | Port ~261 lines into runner | ✅ | ✅ `TestWatchStartsAndWatches` |
+| 9 | Per-test coverage build | Port ~500 lines | | |
+| 10 | Detailed coverage grouping listing | Port ~100 lines | | |
+| 11 | Misplaced filter false positive after `--` | Bug in validate.go | | |
+
+---
+
+## 11. Misplaced Filter Detection False Positive After `--` — BUG
+
+`donotnet test --watch -- --filter Category!=Live` incorrectly triggers the
+misplaced dotnet flag error even though `Category!=Live` was passed after `--`.
+
+Cobra passes args after `--` to `RunE` as `args`, so `checkForMisplacedDotnetArgs`
+sees them and flags them. The check should not apply to args that came after `--`.
+
+- [ ] Add E2E test: `donotnet test -- --filter Category!=Live` should NOT error
+- [ ] Fix: distinguish between bare positional args and args after `--`
+
+**Repro:** `donotnet test --watch -- --filter Category!=Live`
+
+---
+
+## 9. Per-Test Coverage Build — LARGE (port ~500 lines)
+
+The `coverage build` command currently just adds `--collect:XPlat Code Coverage`
+to the normal full test run. The old implementation ran each test (or test group)
+**individually** with coverage to build per-test coverage maps (`.testcoverage.json`).
+These maps power smart test selection in watch mode and `--changed` runs.
+
+- [ ] `hasCoverletCollector()`: verify coverlet.collector package in test projects
+- [ ] `groupTestsByClass()`: group tests by class name for class-granularity
+- [ ] `groupTestsByFile()`: group tests by source file for file-granularity
+- [ ] `buildClassToFileMap()`: map class names to source files
+- [ ] `buildTestCoverageMaps()`: orchestrate parallel per-test coverage collection
+- [ ] `buildSingleTestCoverageMap()`: run individual test groups with coverage, parse Cobertura XML results
+- [ ] Wire into runner when `Coverage: true` — run per-test instead of aggregate
+- [ ] Resume support (skip already-processed tests)
+- [ ] E2E test: `donotnet coverage build` produces `.testcoverage.json` files
+
+**Reference:** `git show main:testcoverage.go` (lines 782-1100)
+
+---
+
+## 10. Detailed Coverage Grouping Listing — SMALL (~100 lines)
+
+The `list coverage` command currently shows a simplified file list. The old
+implementation showed per-granularity grouping stats (method/class/file groups,
+reduction ratios, trait annotations) and a summary table.
+
+- [ ] Show method/class/file group counts and reduction ratios
+- [ ] Show trait annotations per group
+- [ ] Summary table across projects
+- [ ] E2E test
+
+**Reference:** `git show main:testcoverage.go` (lines 1105-1410)
 
 ---
 

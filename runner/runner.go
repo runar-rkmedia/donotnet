@@ -260,6 +260,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Show suggestions (unless suppressed)
 	if !r.opts.NoSuggestions {
 		suggestions.Print(suggestions.Run(r.projects))
+		if r.opts.Command == "test" {
+			suggestions.PrintOnce(suggestions.CheckCoverage(r.gitRoot, r.opts.StalenessCheck))
+		}
 	}
 
 	// Run the command

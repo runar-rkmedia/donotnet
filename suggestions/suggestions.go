@@ -3,6 +3,7 @@ package suggestions
 import (
 	"strings"
 
+	"github.com/runar-rkmedia/donotnet/coverage"
 	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/term"
 )
@@ -82,6 +83,21 @@ func Run(projects []*project.Project) []Suggestion {
 		result = append(result, *s)
 	}
 	return result
+}
+
+// CheckCoverage checks coverage staleness and returns a suggestion if coverage
+// is missing or stale. Returns nil if coverage is fresh or not applicable.
+func CheckCoverage(gitRoot string, stalenessCheck string) *Suggestion {
+	method := coverage.ParseStalenessMethod(stalenessCheck)
+	id, title, desc := coverage.GetSuggestion(gitRoot, method)
+	if id == "" {
+		return nil
+	}
+	return &Suggestion{
+		ID:          id,
+		Title:       title,
+		Description: desc,
+	}
 }
 
 // PrintOnce prints a suggestion if it hasn't been shown this session.
