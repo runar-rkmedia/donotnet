@@ -51,13 +51,22 @@ type testGroup struct {
 // testLineRegex matches test names in dotnet test --list-tests output.
 var testLineRegex = regexp.MustCompile(`^\s{4}(\S.+)$`)
 
+// TestListCache provides optional caching for test list operations.
+// The implementation is responsible for computing appropriate cache keys.
+type TestListCache interface {
+	LookupTestList(p *project.Project) []string
+	StoreTestList(p *project.Project, tests []string)
+}
+
 // BuildOptions configures the per-test coverage build.
 type BuildOptions struct {
-	GitRoot     string
-	Projects    []*project.Project
-	MaxJobs     int
-	Granularity Granularity
-	Ctx         context.Context
+	GitRoot      string
+	Projects     []*project.Project
+	ForwardGraph map[string][]string
+	MaxJobs      int
+	Granularity  Granularity
+	Ctx          context.Context
+	Cache        TestListCache
 }
 
 // BuildPerTestCoverageMaps builds per-test coverage maps for the given test projects.
@@ -121,7 +130,7 @@ func BuildPerTestCoverageMaps(opts BuildOptions) {
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				buildSingleProjectCoverage(ctx, opts.GitRoot, p, cacheDir, opts.Granularity)
+				buildSingleProjectCoverage(ctx, opts.GitRoot, p, cacheDir, opts.Granularity, opts.ForwardGraph, opts.Cache)
 			}
 		}()
 	}
@@ -134,19 +143,34 @@ func BuildPerTestCoverageMaps(opts BuildOptions) {
 }
 
 // buildSingleProjectCoverage builds coverage map for a single test project.
-func buildSingleProjectCoverage(ctx context.Context, gitRoot string, p *project.Project, cacheDir string, granularity Granularity) {
+func buildSingleProjectCoverage(ctx context.Context, gitRoot string, p *project.Project, cacheDir string, granularity Granularity, forwardGraph map[string][]string, testCache TestListCache) {
 	absProjectPath := filepath.Join(gitRoot, p.Path)
 	projectDir := filepath.Dir(absProjectPath)
 	mapFile := filepath.Join(cacheDir, p.Name+".testcoverage.json")
 
 	term.Info("Building per-test coverage map for %s", p.Name)
 
-	// Step 1: List all tests
+	// Step 1: List all tests (check cache first)
 	term.Printf("  Listing tests...\n")
-	tests, err := listTests(ctx, gitRoot, absProjectPath)
-	if err != nil {
-		term.Errorf("  failed to list tests: %v", err)
-		return
+	var tests []string
+	var err error
+
+	if testCache != nil {
+		tests = testCache.LookupTestList(p)
+		if tests != nil {
+			term.Verbose("  test list cache hit: %s (%d tests)", p.Name, len(tests))
+		}
+	}
+
+	if tests == nil {
+		tests, err = listTests(ctx, gitRoot, absProjectPath)
+		if err != nil {
+			term.Errorf("  failed to list tests: %v", err)
+			return
+		}
+		if testCache != nil {
+			testCache.StoreTestList(p, tests)
+		}
 	}
 
 	if len(tests) == 0 {
@@ -234,10 +258,9 @@ func buildSingleProjectCoverage(ctx context.Context, gitRoot string, p *project.
 	// Step 2: Run tests with coverage
 	term.Printf("  Running %d groups with coverage...\n", len(groups))
 
-	numWorkers := runtime.GOMAXPROCS(0)
-	if numWorkers > len(groups) {
-		numWorkers = len(groups)
-	}
+	// Tests within each project must be sequential: coverlet instruments DLLs
+	// which causes file locking if multiple tests run simultaneously.
+	numWorkers := 1
 
 	type groupResult struct {
 		group testGroup
@@ -344,13 +367,25 @@ func buildSingleProjectCoverage(ctx context.Context, gitRoot string, p *project.
 	term.Success("  Processed %d/%d tests, %d files mapped → %s", covMap.ProcessedTests, len(tests), len(covMap.FileToTests), mapFile)
 }
 
-// listTests runs dotnet test --list-tests and returns the test names.
+// listTests is the internal (non-caching) version used within this package.
 func listTests(ctx context.Context, gitRoot, absProjectPath string) ([]string, error) {
+	return ListTests(ctx, gitRoot, absProjectPath)
+}
+
+// ListTests runs dotnet test --list-tests and returns the test names.
+// First tries --no-build for speed, then retries with a build if that fails.
+func ListTests(ctx context.Context, gitRoot, absProjectPath string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "dotnet", "test", absProjectPath, "--list-tests", "--no-build")
 	cmd.Dir = gitRoot
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		// Retry with build
+		cmd = exec.CommandContext(ctx, "dotnet", "test", absProjectPath, "--list-tests")
+		cmd.Dir = gitRoot
+		output, err = cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("dotnet test --list-tests: %w", err)
+		}
 	}
 	return parseTestListOutput(string(output)), nil
 }
