@@ -23,7 +23,7 @@ tag:
 	git tag "$$(git cliff --bumped-version)" -m "$$(git cliff -u --strip all)"
 
 release: bump
-	goreleaser release
+	git push && git push --tags
 
 check-clean:
 	@if [ -n "$$(git status --porcelain)" ]; then \
