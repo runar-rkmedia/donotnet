@@ -22,6 +22,7 @@ func logOutputs(t *testing.T, label string, current, main *cliResult) {
 }
 
 func TestCompareTest(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	needsCompare(t)
 	dir := setupFixtureWithGit(t)
@@ -40,6 +41,7 @@ func TestCompareTest(t *testing.T) {
 }
 
 func TestCompareListTests(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	needsCompare(t)
 	dir := setupFixtureWithGit(t)
@@ -63,6 +65,7 @@ func TestCompareListTests(t *testing.T) {
 }
 
 func TestComparePlan(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	needsCompare(t)
 	dir := setupFixtureWithGit(t)
@@ -87,6 +90,7 @@ func TestComparePlan(t *testing.T) {
 }
 
 func TestCompareCoverageBuild(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	needsCompare(t)
 	dir := setupFixtureWithGit(t)

@@ -90,18 +90,21 @@ func TestMain(m *testing.M) {
 // --- Core CLI tests (no dotnet needed) ---
 
 func TestVersion(t *testing.T) {
+	t.Parallel()
 	r := runCLI(t, binaryPath, t.TempDir(), "version")
 	assertExit(t, r, 0)
 	assertContains(t, r, "donotnet")
 }
 
 func TestListHeuristics(t *testing.T) {
+	t.Parallel()
 	r := runCLI(t, binaryPath, t.TempDir(), "list", "heuristics")
 	assertExit(t, r, 0)
 	assertContains(t, r, "TestFileOnly")
 }
 
 func TestUnknownCommand(t *testing.T) {
+	t.Parallel()
 	r := runCLI(t, binaryPath, t.TempDir(), "nonexistent")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code for unknown command")
@@ -109,6 +112,7 @@ func TestUnknownCommand(t *testing.T) {
 }
 
 func TestHelp(t *testing.T) {
+	t.Parallel()
 	r := runCLI(t, binaryPath, t.TempDir(), "--help")
 	assertExit(t, r, 0)
 	assertContains(t, r, "test")
@@ -119,6 +123,7 @@ func TestHelp(t *testing.T) {
 // --- Project scanning (needs dotnet + fixture) ---
 
 func TestPlan(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -128,6 +133,7 @@ func TestPlan(t *testing.T) {
 }
 
 func TestListAffected(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -151,6 +157,7 @@ public class Calculator
 // --- Test execution ---
 
 func TestBasicTest(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -160,6 +167,7 @@ func TestBasicTest(t *testing.T) {
 }
 
 func TestTestCaching(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -178,6 +186,7 @@ func TestTestCaching(t *testing.T) {
 }
 
 func TestTestForce(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -192,6 +201,7 @@ func TestTestForce(t *testing.T) {
 }
 
 func TestTestCacheInvalidation(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -218,6 +228,7 @@ public class Calculator
 }
 
 func TestDirFlag(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 	parent := filepath.Dir(dir)
@@ -230,6 +241,7 @@ func TestDirFlag(t *testing.T) {
 // --- Build ---
 
 func TestBasicBuild(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -240,6 +252,7 @@ func TestBasicBuild(t *testing.T) {
 // --- List tests ---
 
 func TestListTests(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -249,6 +262,7 @@ func TestListTests(t *testing.T) {
 }
 
 func TestListTestsCached(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -265,6 +279,7 @@ func TestListTestsCached(t *testing.T) {
 // --- Cache ---
 
 func TestCacheStats(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -282,6 +297,7 @@ func TestCacheStats(t *testing.T) {
 }
 
 func TestCacheClean(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -297,6 +313,7 @@ func TestCacheClean(t *testing.T) {
 // --- Config ---
 
 func TestConfig(t *testing.T) {
+	t.Parallel()
 	dir := setupFixtureWithGit(t)
 
 	r := runCLI(t, binaryPath, dir, "config")
@@ -306,6 +323,7 @@ func TestConfig(t *testing.T) {
 // --- Completion ---
 
 func TestCompletion(t *testing.T) {
+	t.Parallel()
 	r := runCLI(t, binaryPath, t.TempDir(), "completion", "bash")
 	assertExit(t, r, 0)
 	assertContains(t, r, "bash")
@@ -314,6 +332,7 @@ func TestCompletion(t *testing.T) {
 // --- Coverage ---
 
 func TestCoverageBuild(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -324,6 +343,7 @@ func TestCoverageBuild(t *testing.T) {
 // --- Did-you-mean for misspelled flags ---
 
 func TestFlagSuggestion(t *testing.T) {
+	t.Parallel()
 	r := runCLI(t, binaryPath, t.TempDir(), "test", "--watc")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code for unknown flag")
@@ -333,6 +353,7 @@ func TestFlagSuggestion(t *testing.T) {
 }
 
 func TestFlagSuggestionBuild(t *testing.T) {
+	t.Parallel()
 	r := runCLI(t, binaryPath, t.TempDir(), "build", "--ful-build")
 	if r.ExitCode == 0 {
 		t.Error("expected non-zero exit code for unknown flag")
@@ -344,6 +365,7 @@ func TestFlagSuggestionBuild(t *testing.T) {
 // --- Misplaced dotnet flag detection ---
 
 func TestMisplacedFilterHint(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -356,6 +378,7 @@ func TestMisplacedFilterHint(t *testing.T) {
 }
 
 func TestFilterAfterDashDashIsNotMisplaced(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -367,6 +390,7 @@ func TestFilterAfterDashDashIsNotMisplaced(t *testing.T) {
 // --- Suggestions (parallel test framework) ---
 
 func TestSuggestionsShown(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -379,6 +403,7 @@ func TestSuggestionsShown(t *testing.T) {
 }
 
 func TestSuggestionsShownWhenCached(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -394,6 +419,7 @@ func TestSuggestionsShownWhenCached(t *testing.T) {
 }
 
 func TestSuggestionsShownInWatchMode(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -404,6 +430,7 @@ func TestSuggestionsShownInWatchMode(t *testing.T) {
 }
 
 func TestSuggestionsSuppressed(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -415,6 +442,7 @@ func TestSuggestionsSuppressed(t *testing.T) {
 // --- Print output ---
 
 func TestPrintOutput(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -427,6 +455,7 @@ func TestPrintOutput(t *testing.T) {
 // --- Dotnet args passthrough ---
 
 func TestDotnetArgsAfterDash(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -438,6 +467,7 @@ func TestDotnetArgsAfterDash(t *testing.T) {
 // --- List coverage ---
 
 func TestListCoverage(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -448,6 +478,7 @@ func TestListCoverage(t *testing.T) {
 // --- VCS flags ---
 
 func TestVcsChanged(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -458,6 +489,7 @@ func TestVcsChanged(t *testing.T) {
 }
 
 func TestVcsRef(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -470,6 +502,7 @@ func TestVcsRef(t *testing.T) {
 // --- Global flags ---
 
 func TestVerboseFlag(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -480,6 +513,7 @@ func TestVerboseFlag(t *testing.T) {
 }
 
 func TestQuietFlag(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -492,6 +526,7 @@ func TestQuietFlag(t *testing.T) {
 // --- Keep-going ---
 
 func TestKeepGoing(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -504,6 +539,7 @@ func TestKeepGoing(t *testing.T) {
 // --- Failed test re-run ---
 
 func TestFailedFlag(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -520,6 +556,7 @@ func TestFailedFlag(t *testing.T) {
 // --- Watch mode ---
 
 func TestWatchStartsAndWatches(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -530,6 +567,7 @@ func TestWatchStartsAndWatches(t *testing.T) {
 }
 
 func TestWatchStartsWhenCached(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 
@@ -548,6 +586,7 @@ func TestWatchStartsWhenCached(t *testing.T) {
 // --- Untested project detection ---
 
 func TestUntestedProjectWarning(t *testing.T) {
+	t.Parallel()
 	needsDotnet(t)
 	dir := setupFixtureWithGit(t)
 

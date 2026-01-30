@@ -95,6 +95,10 @@ func copyFixture(t *testing.T) string {
 		if err != nil {
 			return err
 		}
+		// Skip build output directories — dotnet rebuilds them anyway
+		if d.IsDir() && (d.Name() == "bin" || d.Name() == "obj") {
+			return filepath.SkipDir
+		}
 		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
