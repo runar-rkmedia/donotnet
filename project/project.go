@@ -161,14 +161,21 @@ func Parse(path, relPath string) (*Project, error) {
 	}, nil
 }
 
-// BuildDependencyGraph returns a map of project path -> projects that depend on it (reverse graph).
-func BuildDependencyGraph(projects []*Project) map[string][]string {
-	// Map absolute paths to relative paths
+// buildAbsToRel maps absolute project paths to their relative paths.
+// Uses gitRoot to resolve relative project paths, since they are relative to the git root,
+// not the current working directory.
+func buildAbsToRel(projects []*Project, gitRoot string) map[string]string {
 	absToRel := make(map[string]string)
 	for _, p := range projects {
-		abs, _ := filepath.Abs(p.Path)
+		abs := filepath.Join(gitRoot, p.Path)
 		absToRel[abs] = p.Path
 	}
+	return absToRel
+}
+
+// BuildDependencyGraph returns a map of project path -> projects that depend on it (reverse graph).
+func BuildDependencyGraph(projects []*Project, gitRoot string) map[string][]string {
+	absToRel := buildAbsToRel(projects, gitRoot)
 
 	// Build reverse dependency graph
 	graph := make(map[string][]string)
@@ -183,13 +190,8 @@ func BuildDependencyGraph(projects []*Project) map[string][]string {
 }
 
 // BuildForwardDependencyGraph returns a map of project path -> projects it depends on.
-func BuildForwardDependencyGraph(projects []*Project) map[string][]string {
-	// Map absolute paths to relative paths
-	absToRel := make(map[string]string)
-	for _, p := range projects {
-		abs, _ := filepath.Abs(p.Path)
-		absToRel[abs] = p.Path
-	}
+func BuildForwardDependencyGraph(projects []*Project, gitRoot string) map[string][]string {
+	absToRel := buildAbsToRel(projects, gitRoot)
 
 	// Build forward dependency graph
 	graph := make(map[string][]string)

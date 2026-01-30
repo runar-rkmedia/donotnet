@@ -51,7 +51,7 @@ func scanProjects() (*scanResult, error) {
 		ScanRoot:     scanRoot,
 		Projects:     projects,
 		Solutions:    solutions,
-		Graph:        project.BuildDependencyGraph(projects),
-		ForwardGraph: project.BuildForwardDependencyGraph(projects),
+		Graph:        project.BuildDependencyGraph(projects, gitRoot),
+		ForwardGraph: project.BuildForwardDependencyGraph(projects, gitRoot),
 	}, nil
 }

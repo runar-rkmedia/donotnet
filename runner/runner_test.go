@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/runar-rkmedia/donotnet/config"
@@ -91,6 +93,25 @@ func TestIsNonBuildFile(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isNonBuildFile(%q) = %v, want %v", tt.path, got, tt.want)
 		}
+	}
+}
+
+func TestComputeContentHashIncludesConfigFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a source file and a config file
+	os.WriteFile(filepath.Join(tmpDir, "App.cs"), []byte("class App {}"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "appsettings.json"), []byte(`{"key":"value1"}`), 0644)
+
+	hash1 := ComputeContentHash(tmpDir, []string{tmpDir})
+
+	// Change the config file
+	os.WriteFile(filepath.Join(tmpDir, "appsettings.json"), []byte(`{"key":"value2"}`), 0644)
+
+	hash2 := ComputeContentHash(tmpDir, []string{tmpDir})
+
+	if hash1 == hash2 {
+		t.Error("Content hash should change when config files change")
 	}
 }
 

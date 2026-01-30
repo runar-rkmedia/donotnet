@@ -127,11 +127,6 @@ func TestBuildDependencyGraphs(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Change to temp dir so filepath.Abs works correctly
-	origDir, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(origDir)
-
 	// Create Core project
 	coreDir := filepath.Join(tmpDir, "Core")
 	os.MkdirAll(coreDir, 0755)
@@ -154,8 +149,8 @@ func TestBuildDependencyGraphs(t *testing.T) {
 	app, _ := Parse(appProj, "App/App.csproj")
 	projects := []*Project{core, app}
 
-	// Test forward graph
-	forward := BuildForwardDependencyGraph(projects)
+	// Test forward graph (tmpDir is the git root)
+	forward := BuildForwardDependencyGraph(projects, tmpDir)
 	if len(forward["App/App.csproj"]) == 0 {
 		t.Error("Forward graph should show App depends on Core")
 	}
@@ -164,9 +159,64 @@ func TestBuildDependencyGraphs(t *testing.T) {
 	}
 
 	// Test reverse graph
-	reverse := BuildDependencyGraph(projects)
+	reverse := BuildDependencyGraph(projects, tmpDir)
 	if len(reverse["Core/Core.csproj"]) == 0 {
 		t.Error("Reverse graph should show Core has dependents")
+	}
+}
+
+func TestBuildDependencyGraphFromSubdirectory(t *testing.T) {
+	// This test verifies that the dependency graph is correct even when
+	// the working directory is NOT the git root. This reproduces a bug where
+	// watch mode failed to find dependents because BuildDependencyGraph used
+	// filepath.Abs (relative to CWD) instead of resolving relative to git root.
+	tmpDir, err := os.MkdirTemp("", "graph-subdir-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create directory structure: gitRoot/Source/App and gitRoot/Source/App.Tests
+	appDir := filepath.Join(tmpDir, "Source", "App")
+	testDir := filepath.Join(tmpDir, "Source", "App.Tests")
+	os.MkdirAll(appDir, 0755)
+	os.MkdirAll(testDir, 0755)
+
+	appProj := filepath.Join(appDir, "App.csproj")
+	os.WriteFile(appProj, []byte(`<Project Sdk="Microsoft.NET.Sdk"></Project>`), 0644)
+
+	testProj := filepath.Join(testDir, "App.Tests.csproj")
+	testContent := `<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../App/App.csproj" />
+  </ItemGroup>
+</Project>`
+	os.WriteFile(testProj, []byte(testContent), 0644)
+
+	// Parse projects with paths relative to git root (tmpDir)
+	app, _ := Parse(appProj, "Source/App/App.csproj")
+	tests, _ := Parse(testProj, "Source/App.Tests/App.Tests.csproj")
+	projects := []*Project{app, tests}
+
+	// Build the dependency graph with gitRoot=tmpDir, even though CWD may differ
+	reverse := BuildDependencyGraph(projects, tmpDir)
+
+	// App should have App.Tests as a dependent
+	dependents := reverse["Source/App/App.csproj"]
+	if len(dependents) == 0 {
+		t.Errorf("Reverse graph should show App has dependents, but got none")
+		t.Logf("Graph contents: %v", reverse)
+		t.Logf("App references: %v", app.References)
+		t.Logf("Tests references: %v", tests.References)
+	} else if dependents[0] != "Source/App.Tests/App.Tests.csproj" {
+		t.Errorf("App dependent = %q, want %q", dependents[0], "Source/App.Tests/App.Tests.csproj")
+	}
+
+	// Also verify forward graph
+	forward := BuildForwardDependencyGraph(projects, tmpDir)
+	deps := forward["Source/App.Tests/App.Tests.csproj"]
+	if len(deps) == 0 {
+		t.Errorf("Forward graph should show App.Tests depends on App, but got none")
 	}
 }
 

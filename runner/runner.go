@@ -106,8 +106,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	term.Verbose("Found %d solutions", len(r.solutions))
 
 	// Build dependency graphs
-	r.graph = project.BuildDependencyGraph(r.projects)
-	r.forwardGraph = project.BuildForwardDependencyGraph(r.projects)
+	r.graph = project.BuildDependencyGraph(r.projects, r.gitRoot)
+	r.forwardGraph = project.BuildForwardDependencyGraph(r.projects, r.gitRoot)
 
 	// Build project lookup
 	r.projectsByPath = make(map[string]*project.Project)
@@ -922,7 +922,7 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 		relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
 
 		if projectCommand == "test" && !hasNoBuild {
-			if canSkipBuild(projectPath, relevantDirs) {
+			if canSkipBuild(projectPath, relevantDirs, r.gitRoot) {
 				args = append(args, "--no-build")
 				hasNoBuild = true
 				skippedBuild = true
@@ -932,7 +932,7 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 			}
 		}
 		if !hasNoRestore && !hasNoBuild {
-			if canSkipRestore(projectPath, relevantDirs) {
+			if canSkipRestore(projectPath, relevantDirs, r.gitRoot) {
 				args = append(args, "--no-restore")
 				skippedRestore = true
 				term.Verbose("  [%s] skipping restore (up-to-date)", p.Name)

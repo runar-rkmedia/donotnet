@@ -56,7 +56,11 @@ func ComputeContentHash(root string, dirs []string) string {
 	// Collect all source files
 	var files []string
 	for _, dir := range dirs {
-		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		absDir := dir
+		if !filepath.IsAbs(absDir) {
+			absDir = filepath.Join(root, absDir)
+		}
+		filepath.WalkDir(absDir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -84,11 +88,7 @@ func ComputeContentHash(root string, dirs []string) string {
 				return nil
 			}
 
-			// Only include source files that affect compilation
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext == ".cs" || ext == ".csproj" || ext == ".razor" || ext == ".props" || ext == ".targets" {
-				files = append(files, path)
-			}
+			files = append(files, path)
 			return nil
 		})
 	}
@@ -119,7 +119,7 @@ func ComputeContentHash(root string, dirs []string) string {
 // canSkipRestore checks if --no-restore can be safely used.
 // Returns true if obj/project.assets.json exists and is newer than
 // any .csproj file in the project or its transitive dependencies.
-func canSkipRestore(projectPath string, relevantDirs []string) bool {
+func canSkipRestore(projectPath string, relevantDirs []string, gitRoot string) bool {
 	projectDir := filepath.Dir(projectPath)
 	assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
 
@@ -130,6 +130,9 @@ func canSkipRestore(projectPath string, relevantDirs []string) bool {
 
 	// Check if any .csproj in the project or its dependencies is newer than assets.json
 	for _, dir := range relevantDirs {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(gitRoot, dir)
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -156,7 +159,7 @@ func canSkipRestore(projectPath string, relevantDirs []string) bool {
 // canSkipBuild checks if --no-build can be safely used.
 // Returns true if output DLL exists and is newer than all source files
 // in the project AND all its transitive dependencies.
-func canSkipBuild(projectPath string, relevantDirs []string) bool {
+func canSkipBuild(projectPath string, relevantDirs []string, gitRoot string) bool {
 	projectDir := filepath.Dir(projectPath)
 	projectName := strings.TrimSuffix(filepath.Base(projectPath), ".csproj")
 
@@ -190,6 +193,9 @@ func canSkipBuild(projectPath string, relevantDirs []string) bool {
 		if newerSourceFound {
 			break
 		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(gitRoot, dir)
+		}
 		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || newerSourceFound {
 				return filepath.SkipAll
@@ -202,8 +208,7 @@ func canSkipBuild(projectPath string, relevantDirs []string) bool {
 				return nil
 			}
 
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext != ".cs" && ext != ".csproj" && ext != ".razor" && ext != ".props" && ext != ".targets" {
+			if isNonBuildFile(d.Name()) {
 				return nil
 			}
 
