@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	ignore "github.com/sabhiram/go-gitignore"
+	"github.com/runar-rkmedia/donotnet/project"
 )
 
 // HashArgs creates a hash of command arguments for cache keys.
@@ -67,9 +68,8 @@ func ComputeContentHash(root string, dirs []string) string {
 
 			name := d.Name()
 
-			// Always skip these directories
 			if d.IsDir() {
-				if name == "bin" || name == "obj" || name == ".git" || name == "node_modules" {
+				if project.ShouldSkipDir(name) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -201,8 +201,7 @@ func canSkipBuild(projectPath string, relevantDirs []string, gitRoot string) boo
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
-				name := d.Name()
-				if name == "bin" || name == "obj" || name == ".git" {
+				if project.ShouldSkipDir(d.Name()) {
 					return filepath.SkipDir
 				}
 				return nil

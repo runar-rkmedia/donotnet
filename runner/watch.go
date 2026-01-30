@@ -84,7 +84,34 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 		}
 	}
 
-	term.Info("Watching %d directories for changes (Ctrl+C to stop)...", len(watchedDirs))
+	// Set up keyboard input (only for interactive terminals)
+	keyReader := term.NewKeyReader()
+	var keyChan <-chan byte
+	if keyReader != nil {
+		defer keyReader.Close()
+		keyChan = keyReader.Keys()
+	}
+
+	// Watch state: overrides and last-run tracking
+	var overrides watchOverrides
+	var lastTargets []*project.Project
+	var lastSuccess bool
+	// Track all test projects for rerun/run-all
+	var allTestProjects []*project.Project
+	for _, p := range r.projects {
+		if r.opts.Command == "test" && p.IsTest {
+			allTestProjects = append(allTestProjects, p)
+		} else if r.opts.Command != "test" {
+			allTestProjects = append(allTestProjects, p)
+		}
+	}
+	lastTargets = allTestProjects
+
+	// Start background test discovery (for 't' filter menu)
+	testListsCache := newWatchTestListCache(ctx, r)
+
+	term.Info("Watching %d directories for changes...", len(watchedDirs))
+	printWatchHint(&overrides)
 
 	// Handle Ctrl+C
 	sigChan := make(chan os.Signal, 1)
@@ -97,7 +124,78 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 	pendingFiles := make(map[string]struct{})
 	var pendingMu sync.Mutex
 
-	runPending := func() {
+	// applyOverridesAndRun applies user overrides to the target list, runs the
+	// projects, and updates last-run state. The caller provides the base targets
+	// and an optional test filter (nil means no per-file filtering).
+	applyOverridesAndRun := func(baseTargets []*project.Project, filter TestFilterer) {
+		runTargets := baseTargets
+
+		// Apply project override
+		if len(overrides.projects) > 0 {
+			overrideSet := make(map[string]bool)
+			for _, p := range overrides.projects {
+				overrideSet[p] = true
+			}
+			var filtered []*project.Project
+			for _, p := range r.projects {
+				if overrideSet[p.Path] {
+					filtered = append(filtered, p)
+				}
+			}
+			if len(filtered) > 0 {
+				runTargets = filtered
+			}
+		}
+
+		if len(runTargets) == 0 {
+			return
+		}
+
+		// Build extra filter expression from overrides and combine with
+		// any existing --filter from the user's CLI args into a single value.
+		savedArgs := r.opts.DotnetArgs
+		var extraFilter string
+		if overrides.testFilter != "" {
+			extraFilter = "FullyQualifiedName~" + overrides.testFilter
+		}
+		if overrides.traitExpr != "" {
+			if extraFilter != "" {
+				extraFilter += "&" + overrides.traitExpr
+			} else {
+				extraFilter = overrides.traitExpr
+			}
+		}
+		if extraFilter != "" {
+			baseArgs := savedArgs
+			// When a trait override is active, strip existing Category clauses
+			// from the base filter to avoid contradictions like
+			// (Category!=Live)&(Category=Live).
+			if overrides.traitExpr != "" {
+				existing := extractFilter(savedArgs)
+				if existing != "" {
+					stripped := removeCategoryFromFilter(existing)
+					baseArgs = removeFilter(savedArgs)
+					if stripped != "" {
+						baseArgs = append(baseArgs, "--filter", stripped)
+					}
+				}
+			}
+			r.opts.DotnetArgs = combineFilter(baseArgs, extraFilter)
+		}
+
+		r.opts.TestFilter = filter
+		term.Println()
+		lastSuccess = r.runProjects(ctx, runTargets, nil, argsHash)
+		lastTargets = runTargets
+		r.opts.DotnetArgs = savedArgs
+
+		term.Info("\nWatching for changes...")
+		printWatchHint(&overrides)
+	}
+
+	// runFromFileChanges determines targets from changed files (coverage/deps)
+	// and runs them.
+	runFromFileChanges := func() {
 		pendingMu.Lock()
 		if len(pendingChanges) == 0 && len(pendingFiles) == 0 {
 			pendingMu.Unlock()
@@ -174,14 +272,7 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 			return
 		}
 
-		term.Println()
-
-		// Set the test filter on opts for this run
-		r.opts.TestFilter = currentFilter
-
-		r.runProjects(ctx, watchTargets, nil, argsHash)
-
-		term.Info("\nWatching for changes...")
+		applyOverridesAndRun(watchTargets, currentFilter)
 	}
 
 	for {
@@ -189,6 +280,100 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 		case <-sigChan:
 			term.Dim("\nStopping watch mode...")
 			return nil
+
+		case key, ok := <-keyChan:
+			if !ok {
+				keyChan = nil
+				continue
+			}
+
+			action := mapKeyToAction(key)
+			switch action {
+			case actionQuit:
+				term.Dim("\nStopping watch mode...")
+				return nil
+
+			case actionHelp:
+				printHelp()
+				printWatchHint(&overrides)
+
+			case actionRerun:
+				if len(lastTargets) > 0 {
+					term.Info("\nForce rerun...")
+					savedForce := r.opts.Force
+					r.opts.Force = true
+					applyOverridesAndRun(lastTargets, nil)
+					r.opts.Force = savedForce
+				} else {
+					term.Warn("No previous run to repeat")
+				}
+
+			case actionRunAll:
+				term.Info("\nRunning all...")
+				overrides.clear()
+				savedForce := r.opts.Force
+				r.opts.Force = true
+				applyOverridesAndRun(allTestProjects, nil)
+				r.opts.Force = savedForce
+
+			case actionRunFailed:
+				if lastSuccess {
+					term.Dim("Last run succeeded, nothing to rerun")
+					continue
+				}
+				if r.opts.Command != "test" {
+					term.Warn("Failed-only mode is only supported for tests")
+					continue
+				}
+				term.Info("\nRunning failed tests...")
+				// Build failed test filters from TRX/output
+				failedFilters := make(map[string]string)
+				for _, p := range lastTargets {
+					filter := getFailedTestFilter(nil, r.reportsDir, p.Name)
+					if filter != "" {
+						failedFilters[p.Path] = filter
+					}
+				}
+				if len(failedFilters) == 0 {
+					term.Warn("Could not determine failed tests, rerunning all")
+					savedForce := r.opts.Force
+					r.opts.Force = true
+					applyOverridesAndRun(lastTargets, nil)
+					r.opts.Force = savedForce
+				} else {
+					savedFailed := r.opts.FailedTestFilters
+					savedForce := r.opts.Force
+					r.opts.FailedTestFilters = failedFilters
+					r.opts.Force = true
+					applyOverridesAndRun(lastTargets, nil)
+					r.opts.FailedTestFilters = savedFailed
+					r.opts.Force = savedForce
+				}
+
+			case actionFilterProject:
+				if keyReader == nil {
+					continue
+				}
+				overrides.projects = handleFilterProject(keyReader, r.projects, overrides.projects)
+				term.Println()
+				printWatchHint(&overrides)
+
+			case actionFilterTest:
+				if keyReader == nil {
+					continue
+				}
+				overrides.testFilter = handleFilterTest(keyReader, testListsCache.get(), overrides.testFilter)
+				term.Println()
+				printWatchHint(&overrides)
+
+			case actionFilterTrait:
+				if keyReader == nil {
+					continue
+				}
+				overrides.traitExpr = handleFilterTrait(keyReader, r.projects, r.gitRoot, overrides.traitExpr)
+				term.Println()
+				printWatchHint(&overrides)
+			}
 
 		case event, ok := <-watcher.Events:
 			if !ok {
@@ -206,6 +391,13 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 
 			relPath, relErr := filepath.Rel(r.gitRoot, event.Name)
 			if relErr != nil {
+				continue
+			}
+
+			// Skip events whose path contains a directory we never care about
+			// (e.g. node_modules, bin, obj). The watcher doesn't recurse into
+			// these, but the parent directory still receives events for them.
+			if containsSkipDir(relPath) {
 				continue
 			}
 
@@ -232,7 +424,7 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 			if debounceTimer != nil {
 				debounceTimer.Stop()
 			}
-			debounceTimer = time.AfterFunc(100*time.Millisecond, runPending)
+			debounceTimer = time.AfterFunc(100*time.Millisecond, runFromFileChanges)
 
 		case watchErr, ok := <-watcher.Errors:
 			if !ok {
@@ -293,6 +485,17 @@ func loadAllTestCoverageMaps(cacheDir string) map[string]*testfilter.TestCoverag
 	}
 
 	return result
+}
+
+// containsSkipDir returns true if any component of the path is a directory
+// that should be ignored (e.g. node_modules, bin, obj).
+func containsSkipDir(relPath string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(relPath), "/") {
+		if project.ShouldSkipDir(part) {
+			return true
+		}
+	}
+	return false
 }
 
 // addDirRecursive adds a directory and all subdirectories to the watcher,

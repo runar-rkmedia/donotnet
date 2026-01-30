@@ -24,19 +24,73 @@ func shouldAutoQuiet(args []string) bool {
 	return false
 }
 
-// filterBuildArgs removes test-specific arguments that shouldn't be passed to dotnet build.
-func filterBuildArgs(args []string) []string {
-	var filtered []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		// Skip --filter and its value
-		if arg == "--filter" {
-			i++ // skip the next arg (the filter value)
-			continue
+// extractFilter returns the --filter value from args, or "" if none.
+// Handles both "--filter" "value" and "--filter=value" forms.
+func extractFilter(args []string) string {
+	for i, arg := range args {
+		if arg == "--filter" && i+1 < len(args) {
+			return args[i+1]
 		}
 		if strings.HasPrefix(arg, "--filter=") {
+			return strings.TrimPrefix(arg, "--filter=")
+		}
+	}
+	return ""
+}
+
+// removeFilter returns a copy of args with --filter (and its value) removed.
+func removeFilter(args []string) []string {
+	var result []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--filter" && i+1 < len(args) {
+			i++ // skip value
 			continue
 		}
+		if strings.HasPrefix(args[i], "--filter=") {
+			continue
+		}
+		result = append(result, args[i])
+	}
+	return result
+}
+
+// combineFilter merges an extra filter expression into existing args.
+// If the args already contain --filter, the expressions are combined with &.
+// Otherwise a new --filter arg is appended.
+func combineFilter(args []string, extra string) []string {
+	existing := extractFilter(args)
+	if existing != "" {
+		without := removeFilter(args)
+		return append(without, "--filter", "("+existing+")&("+extra+")")
+	}
+	return append(append([]string{}, args...), "--filter", extra)
+}
+
+// removeCategoryFromFilter strips all Category-related clauses from a dotnet
+// test filter string. This is used when an interactive trait override replaces
+// the category filter so that contradictions like
+// (Category!=Live)&(Category=Live) are avoided.
+func removeCategoryFromFilter(filter string) string {
+	// Split on & and keep only non-Category parts
+	parts := strings.Split(filter, "&")
+	var kept []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		// Strip wrapping parens for the check
+		inner := strings.TrimPrefix(strings.TrimSuffix(trimmed, ")"), "(")
+		if strings.HasPrefix(inner, "Category=") || strings.HasPrefix(inner, "Category!=") {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	return strings.Join(kept, "&")
+}
+
+// filterBuildArgs removes test-specific arguments that shouldn't be passed to dotnet build.
+func filterBuildArgs(args []string) []string {
+	args = removeFilter(args)
+	var filtered []string
+	for _, arg := range args {
 		// Skip --blame flags (test-specific)
 		if arg == "--blame" || arg == "--blame-hang" || arg == "--blame-crash" {
 			continue

@@ -957,27 +957,9 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 	var filteredTests bool
 	var testClasses []string
 	var argsBeforeOurFilter []string
-	var userFilter string
+	userFilter := extractFilter(extraArgs)
+	originalExtraArgs := extraArgs // before any filter modifications
 	var skipTestsDueToUserFilter bool
-
-	// Extract user filter
-	existingFilterIdx := -1
-	for i, arg := range extraArgs {
-		if arg == "--filter" && i+1 < len(extraArgs) {
-			existingFilterIdx = i + 1
-			break
-		} else if strings.HasPrefix(arg, "--filter=") {
-			existingFilterIdx = i
-			break
-		}
-	}
-	if existingFilterIdx >= 0 {
-		if strings.HasPrefix(extraArgs[existingFilterIdx], "--filter=") {
-			userFilter = strings.TrimPrefix(extraArgs[existingFilterIdx], "--filter=")
-		} else {
-			userFilter = extraArgs[existingFilterIdx]
-		}
-	}
 
 	if projectCommand == "test" && r.opts.TestFilter != nil {
 		filterResult := r.opts.TestFilter.GetFilter(p.Path, r.gitRoot, userFilter)
@@ -989,21 +971,13 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 			argsBeforeOurFilter = make([]string, len(args))
 			copy(argsBeforeOurFilter, args)
 
-			if existingFilterIdx >= 0 {
-				combinedFilter := fmt.Sprintf("(%s)&(%s)", filterResult.TestFilter, userFilter)
-				args = append(args, "--filter", combinedFilter)
-				filteredTests = true
-				testClasses = filterResult.TestClasses
+			// Combine our test filter with user's --filter (if any) into extraArgs
+			extraArgs = combineFilter(removeFilter(extraArgs), filterResult.TestFilter)
+			filteredTests = true
+			testClasses = filterResult.TestClasses
+			if userFilter != "" {
 				term.Verbose("  [%s] filtering to: %s (combined with user filter)", p.Name, strings.Join(testClasses, ", "))
-				if strings.HasPrefix(extraArgs[existingFilterIdx], "--filter=") {
-					extraArgs = append(extraArgs[:existingFilterIdx], extraArgs[existingFilterIdx+1:]...)
-				} else {
-					extraArgs = append(extraArgs[:existingFilterIdx-1], extraArgs[existingFilterIdx+1:]...)
-				}
 			} else {
-				args = append(args, "--filter", filterResult.TestFilter)
-				filteredTests = true
-				testClasses = filterResult.TestClasses
 				term.Verbose("  [%s] filtering to: %s", p.Name, strings.Join(testClasses, ", "))
 			}
 		} else {
@@ -1016,10 +990,10 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 		return runResult{project: p, success: true, output: "skipped: all tests excluded by user filter", skippedByFilter: true}
 	}
 
-	// Apply failed test filters
+	// Apply failed test filters — combine with any existing --filter in extraArgs
 	if projectCommand == "test" && r.opts.FailedTestFilters != nil {
 		if filter, ok := r.opts.FailedTestFilters[p.Path]; ok && filter != "" {
-			args = append(args, "--filter", filter)
+			extraArgs = combineFilter(extraArgs, filter)
 			filteredTests = true
 			testClasses = []string{"previously failed"}
 		}
@@ -1139,10 +1113,7 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 
 		retryArgs := make([]string, len(argsBeforeOurFilter))
 		copy(retryArgs, argsBeforeOurFilter)
-		if userFilter != "" {
-			retryArgs = append(retryArgs, "--filter", userFilter)
-		}
-		retryArgs = append(retryArgs, extraArgs...)
+		retryArgs = append(retryArgs, originalExtraArgs...)
 
 		output.Reset()
 		projectStart = time.Now()
@@ -1240,16 +1211,7 @@ func (r *Runner) printStartMessage(targets, cached []*project.Project, numWorker
 
 	// Print per-project test filter preview
 	if r.opts.TestFilter != nil {
-		var previewUserFilter string
-		for i, arg := range r.opts.DotnetArgs {
-			if arg == "--filter" && i+1 < len(r.opts.DotnetArgs) {
-				previewUserFilter = r.opts.DotnetArgs[i+1]
-				break
-			} else if strings.HasPrefix(arg, "--filter=") {
-				previewUserFilter = strings.TrimPrefix(arg, "--filter=")
-				break
-			}
-		}
+		previewUserFilter := extractFilter(r.opts.DotnetArgs)
 
 		var hasFilters bool
 		var hasSkipped bool

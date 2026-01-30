@@ -64,17 +64,48 @@ type Terminal struct {
 	plain    bool // when true, disable all ANSI codes
 	progress bool // when true, show progress indicators
 	isTTY    bool // true if stderr is a terminal
+	rawMode  bool // true when stdin is in raw terminal mode
+}
+
+// rawWriter wraps an io.Writer and translates bare \n to \r\n.
+// In raw terminal mode the kernel does not perform output processing,
+// so we need explicit carriage returns.
+type rawWriter struct {
+	inner io.Writer
+	t     *Terminal
+}
+
+func (rw *rawWriter) Write(p []byte) (int, error) {
+	if !rw.t.rawMode {
+		return rw.inner.Write(p)
+	}
+	// Replace \n that is not preceded by \r with \r\n
+	var out []byte
+	for i := 0; i < len(p); i++ {
+		if p[i] == '\n' && (i == 0 || p[i-1] != '\r') {
+			out = append(out, '\r', '\n')
+		} else {
+			out = append(out, p[i])
+		}
+	}
+	n, err := rw.inner.Write(out)
+	// Report original byte count to callers (fmt expects this)
+	if n >= len(out) {
+		return len(p), err
+	}
+	return n, err
 }
 
 // New creates a Terminal that writes to stderr
 func New() *Terminal {
 	isTTY := goterm.IsTerminal(int(os.Stderr.Fd()))
-	return &Terminal{
-		w:        os.Stderr,
+	t := &Terminal{
 		isTTY:    isTTY,
 		plain:    !isTTY, // default to plain mode if not a TTY
 		progress: isTTY,  // default to progress only if TTY
 	}
+	t.w = &rawWriter{inner: os.Stderr, t: t}
+	return t
 }
 
 // SetPlain enables or disables plain mode (no ANSI codes)
@@ -100,6 +131,12 @@ func (t *Terminal) IsPlain() bool {
 // ShowProgress returns whether progress indicators should be shown
 func (t *Terminal) ShowProgress() bool {
 	return t.progress
+}
+
+// SetRawMode tells the terminal that stdin is in raw mode.
+// When raw mode is active, \n is translated to \r\n in all output.
+func (t *Terminal) SetRawMode(raw bool) {
+	t.rawMode = raw
 }
 
 // SetVerbose enables or disables verbose output
@@ -310,6 +347,7 @@ var Default = New()
 
 func SetPlain(p bool)                  { Default.SetPlain(p) }
 func SetProgress(p bool)               { Default.SetProgress(p) }
+func SetRawMode(raw bool)              { Default.SetRawMode(raw) }
 func SetVerbose(v bool)                { Default.SetVerbose(v) }
 func IsVerbose() bool                  { return Default.Verbose }
 func IsTTY() bool                      { return Default.IsTTY() }
