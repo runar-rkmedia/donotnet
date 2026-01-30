@@ -17,13 +17,26 @@ import (
 	"github.com/runar-rkmedia/donotnet/testfilter"
 )
 
-// relevantExtensions are file extensions we care about for watch mode.
-var relevantExtensions = map[string]bool{
-	".cs":      true,
-	".csproj":  true,
-	".razor":   true,
-	".props":   true,
-	".targets": true,
+// ignoredExtensions are file extensions we know are not relevant for watch mode.
+// Everything else is assumed to potentially affect builds/tests.
+var ignoredExtensions = map[string]bool{
+	".dll":  true,
+	".exe":  true,
+	".pdb":  true,
+	".obj":  true,
+	".o":    true,
+	".a":    true,
+	".so":   true,
+	".dylib": true,
+	".nupkg": true,
+	".snupkg": true,
+	".log":  true,
+	".suo":  true,
+	".user": true,
+	".cache": true,
+	".tmp":  true,
+	".swp":  true,
+	".swo":  true,
 }
 
 // runWatch sets up file watchers and re-runs on file changes.
@@ -187,7 +200,7 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 			}
 
 			ext := strings.ToLower(filepath.Ext(event.Name))
-			if !relevantExtensions[ext] {
+			if ignoredExtensions[ext] {
 				continue
 			}
 
@@ -293,8 +306,7 @@ func addDirRecursive(watcher *fsnotify.Watcher, dir string, watched map[string]b
 			return nil
 		}
 
-		name := d.Name()
-		if name == "bin" || name == "obj" || name == ".git" || name == "node_modules" || name == ".vs" {
+		if project.ShouldSkipDir(d.Name()) {
 			return filepath.SkipDir
 		}
 
