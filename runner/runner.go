@@ -822,6 +822,27 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 		}
 	}
 
+	// Reprint a clean results table when failures caused interleaved output
+	if len(failures) > 0 && len(allResults) > 1 {
+		term.Printf("\n--- Results ---\n")
+		for _, res := range allResults {
+			skipIndicator := term.SkipIndicator(res.skippedBuild, res.skippedRestore)
+			paddedName := fmt.Sprintf("%-*s", maxNameLen, res.project.Name)
+			durationStr := fmt.Sprintf("%7s", res.duration.Round(time.Millisecond))
+			var stats, suffix string
+			if res.buildOnly {
+				if term.IsPlain() {
+					suffix = "  (no tests)"
+				} else {
+					suffix = fmt.Sprintf("  %s(no tests)%s", term.ColorDim, term.ColorReset)
+				}
+			} else {
+				stats = extractTestStats(res.output)
+			}
+			term.ResultLine(res.success, skipIndicator, paddedName, durationStr, stats, suffix)
+		}
+	}
+
 	// Show summary
 	if buildSucceeded > 0 || (len(r.opts.BuildOnlyProjects) > 0 && len(failures) > 0) {
 		testTotal := len(targets) - len(r.opts.BuildOnlyProjects)
