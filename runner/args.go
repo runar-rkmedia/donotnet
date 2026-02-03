@@ -86,6 +86,26 @@ func removeCategoryFromFilter(filter string) string {
 	return strings.Join(kept, "&")
 }
 
+// parseCategoryFilters extracts Category clauses from a dotnet filter string.
+// Returns two maps: included["Live"]=true for Category=Live, excluded["Live"]=true for Category!=Live.
+func parseCategoryFilters(filter string) (included, excluded map[string]bool) {
+	included = make(map[string]bool)
+	excluded = make(map[string]bool)
+	if filter == "" {
+		return
+	}
+	for _, p := range strings.Split(filter, "&") {
+		inner := strings.TrimSpace(p)
+		inner = strings.TrimPrefix(strings.TrimSuffix(inner, ")"), "(")
+		if strings.HasPrefix(inner, "Category!=") {
+			excluded[strings.TrimPrefix(inner, "Category!=")] = true
+		} else if strings.HasPrefix(inner, "Category=") {
+			included[strings.TrimPrefix(inner, "Category=")] = true
+		}
+	}
+	return
+}
+
 // filterBuildArgs removes test-specific arguments that shouldn't be passed to dotnet build.
 func filterBuildArgs(args []string) []string {
 	args = removeFilter(args)

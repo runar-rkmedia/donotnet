@@ -261,19 +261,160 @@ func handleFilterProject(kr *term.KeyReader, projects []*project.Project, curren
 	return selected
 }
 
+// testTraitInfo holds per-test trait data and active category filters
+// for annotating the test list display.
+type testTraitInfo struct {
+	traitMaps map[string]testfilter.TraitMap // project name → trait map
+	included  map[string]bool               // categories included by active filters
+	excluded  map[string]bool               // categories excluded by active filters
+}
+
+// testEntry pairs a test name with its project.
+type testEntry struct {
+	name    string
+	project string
+}
+
+// renderTestList prints tests matching filter, returns line count.
+// If filter is empty, shows all (up to limit). Uses case-insensitive substring matching.
+func renderTestList(tests []testEntry, filter string, traitInfo *testTraitInfo, limit int, singleProject bool) int {
+	dim := term.Color(term.ColorDim)
+	reset := term.Color(term.ColorReset)
+	red := term.Color(term.ColorRed)
+
+	var visible []testEntry
+	if filter == "" {
+		visible = tests
+	} else {
+		lower := strings.ToLower(filter)
+		for _, t := range tests {
+			if strings.Contains(strings.ToLower(t.name), lower) {
+				visible = append(visible, t)
+			}
+		}
+	}
+
+	if len(visible) == 0 {
+		if filter != "" {
+			term.Dim("  (no matches)")
+			return 1
+		}
+		return 0
+	}
+
+	cap := limit
+	if cap <= 0 || cap > len(visible) {
+		cap = len(visible)
+	}
+
+	lines := 0
+	prevName := ""
+	for i := 0; i < cap; i++ {
+		t := visible[i]
+
+		// Find common prefix with previous entry for dim rendering
+		commonLen := 0
+		if prevName != "" {
+			cl := len(prevName)
+			if len(t.name) < cl {
+				cl = len(t.name)
+			}
+			for commonLen < cl && t.name[commonLen] == prevName[commonLen] {
+				commonLen++
+			}
+			if idx := strings.LastIndex(t.name[:commonLen], "."); idx >= 0 {
+				commonLen = idx + 1
+			} else {
+				commonLen = 0
+			}
+		}
+		prevName = t.name
+
+		// Format name with dim prefix
+		var formatted strings.Builder
+		inDim := false
+		for j, ch := range t.name {
+			wantDim := j < commonLen || ch == '.' || ch == '_'
+			if wantDim != inDim {
+				if wantDim {
+					formatted.WriteString(dim)
+				} else {
+					formatted.WriteString(reset)
+				}
+				inDim = wantDim
+			}
+			formatted.WriteRune(ch)
+		}
+		if inDim {
+			formatted.WriteString(reset)
+		}
+
+		// Build trait annotation
+		var traitSuffix string
+		if traitInfo != nil {
+			if tm, ok := traitInfo.traitMaps[t.project]; ok {
+				traits := tm.GetTraitsForTest(t.name)
+				if len(traits) > 0 {
+					traitSuffix = " " + dim + "[" + strings.Join(traits, ", ") + "]" + reset
+
+					// Check if any trait is excluded by active filters
+					excluded := false
+					for _, tr := range traits {
+						if traitInfo.excluded[tr] {
+							excluded = true
+							break
+						}
+					}
+					// Check if there's an include filter and this test's traits don't match
+					if !excluded && len(traitInfo.included) > 0 {
+						hasIncluded := false
+						for _, tr := range traits {
+							if traitInfo.included[tr] {
+								hasIncluded = true
+								break
+							}
+						}
+						if !hasIncluded {
+							excluded = true
+						}
+					}
+					if excluded {
+						traitSuffix += " " + red + "excluded" + reset
+					}
+				}
+			}
+		}
+
+		if singleProject {
+			term.Printf("  %s%d)%s %s%s\n", dim, i+1, reset, formatted.String(), traitSuffix)
+		} else {
+			term.Printf("  %s%d)%s %s %s(%s)%s%s\n",
+				dim, i+1, reset,
+				formatted.String(),
+				dim, t.project, reset,
+				traitSuffix)
+		}
+		lines++
+	}
+
+	if cap < len(visible) {
+		term.Dim("  ... and %d more", len(visible)-cap)
+		lines++
+	}
+
+	return lines
+}
+
 // handleFilterTest shows discovered tests and lets the user pick or type a filter.
 // testLists maps project name → list of fully qualified test names (from cache).
-func handleFilterTest(kr *term.KeyReader, testLists map[string][]string, current string) string {
+// traitInfo provides optional trait annotations (may be nil).
+func handleFilterTest(kr *term.KeyReader, testLists map[string][]string, current string, traitInfo *testTraitInfo) string {
 	term.Println()
 	if current != "" {
 		term.Dim("Current filter: %s", current)
 	}
 
 	// Flatten and deduplicate test names across projects
-	type testEntry struct {
-		name    string
-		project string
-	}
 	var allTests []testEntry
 	seen := make(map[string]bool)
 	for proj, tests := range testLists {
@@ -288,73 +429,37 @@ func handleFilterTest(kr *term.KeyReader, testLists map[string][]string, current
 		return allTests[i].name < allTests[j].name
 	})
 
-	if len(allTests) > 0 {
-		term.Info("Discovered tests (%d):", len(allTests))
-		dim := term.Color(term.ColorDim)
-		reset := term.Color(term.ColorReset)
-		singleProject := len(testLists) == 1
+	singleProject := len(testLists) == 1
 
-		prevName := ""
-		for i, t := range allTests {
-			if i >= 50 {
-				term.Dim("  ... and %d more", len(allTests)-50)
-				break
-			}
-
-			// Find how much of the name matches the previous entry.
-			// Works because allTests is sorted by name.
-			commonLen := 0
-			if prevName != "" {
-				limit := len(prevName)
-				if len(t.name) < limit {
-					limit = len(t.name)
-				}
-				for commonLen < limit && t.name[commonLen] == prevName[commonLen] {
-					commonLen++
-				}
-				// Snap to the last dot boundary so we dim full segments
-				if idx := strings.LastIndex(t.name[:commonLen], "."); idx >= 0 {
-					commonLen = idx + 1 // include the dot
-				} else {
-					commonLen = 0
-				}
-			}
-			prevName = t.name
-
-			// Render: dim repeated prefix, highlight unique suffix,
-			// always dim '.' and '_' in both parts.
-			// Batch consecutive dim/normal spans to reduce ANSI noise.
-			var formatted strings.Builder
-			inDim := false
-			for j, ch := range t.name {
-				wantDim := j < commonLen || ch == '.' || ch == '_'
-				if wantDim != inDim {
-					if wantDim {
-						formatted.WriteString(dim)
-					} else {
-						formatted.WriteString(reset)
-					}
-					inDim = wantDim
-				}
-				formatted.WriteRune(ch)
-			}
-			if inDim {
-				formatted.WriteString(reset)
-			}
-
-			if singleProject {
-				term.Printf("  %s%d)%s %s\n", dim, i+1, reset, formatted.String())
-			} else {
-				term.Printf("  %s%d)%s %s %s(%s)%s\n",
-					dim, i+1, reset,
-					formatted.String(),
-					dim, t.project, reset)
-			}
+	if len(allTests) == 0 {
+		term.Info("No tests discovered. Enter a test name filter (partial match), or empty to clear:")
+		input, ok := kr.ReadLine(term.Color(term.ColorCyan) + "> " + term.Color(term.ColorReset))
+		if !ok {
+			term.Dim("Cancelled")
+			return current
 		}
+		input = strings.TrimSpace(input)
+		if input == "" {
+			if current != "" {
+				term.Dim("Test filter cleared")
+			}
+			return ""
+		}
+		term.Info("Test filter: %s", input)
+		return input
 	}
 
-	term.Info("Enter number, test name filter (partial match), or empty to clear:")
-	input, ok := kr.ReadLine(term.Color(term.ColorCyan) + "> " + term.Color(term.ColorReset))
+	term.Info("Discovered tests (%d) — type to filter:", len(allTests))
+
+	prompt := term.Color(term.ColorCyan) + "> " + term.Color(term.ColorReset)
+	onChange := func(input string) int {
+		if input == "" {
+			return renderTestList(allTests, "", traitInfo, 50, singleProject)
+		}
+		return renderTestList(allTests, input, traitInfo, 20, singleProject)
+	}
+
+	input, ok := kr.ReadLineFiltered(prompt, onChange)
 	if !ok {
 		term.Dim("Cancelled")
 		return current
@@ -368,7 +473,7 @@ func handleFilterTest(kr *term.KeyReader, testLists map[string][]string, current
 		return ""
 	}
 
-	// Check if input is a number selecting from the list
+	// Check if input is a number selecting from the visible list
 	if num, err := strconv.Atoi(input); err == nil && num >= 1 && num <= len(allTests) {
 		selected := allTests[num-1].name
 		term.Info("Test filter: %s", selected)
@@ -380,8 +485,9 @@ func handleFilterTest(kr *term.KeyReader, testLists map[string][]string, current
 }
 
 // handleFilterTrait discovers traits across test projects and lets the user
-// include or exclude a trait category.
-func handleFilterTrait(kr *term.KeyReader, projects []*project.Project, gitRoot string, current string) string {
+// include or exclude a trait category. userFilter is the --filter value from
+// the user's CLI args (used to show which traits are already filtered).
+func handleFilterTrait(kr *term.KeyReader, projects []*project.Project, gitRoot string, current string, userFilter string) string {
 	// Discover traits across all test projects
 	allTraits := make(map[string]bool)
 	for _, p := range projects {
@@ -406,13 +512,33 @@ func handleFilterTrait(kr *term.KeyReader, projects []*project.Project, gitRoot 
 	}
 	sort.Strings(sorted)
 
+	// Parse which traits are filtered by CLI args and by the current override
+	cliIncluded, cliExcluded := parseCategoryFilters(userFilter)
+	overrideIncluded, overrideExcluded := parseCategoryFilters(current)
+
+	dim := term.Color(term.ColorDim)
+	green := term.Color(term.ColorGreen)
+	red := term.Color(term.ColorRed)
+	yellow := term.Color(term.ColorYellow)
+	reset := term.Color(term.ColorReset)
+
 	term.Println()
 	if current != "" {
-		term.Dim("Current trait filter: %s", current)
+		term.Dim("Current override: %s", current)
 	}
 	term.Info("Select trait (prefix with ! to exclude, empty to clear):")
 	for i, t := range sorted {
-		term.Printf("  %d) %s\n", i+1, t)
+		var marker string
+		if overrideIncluded[t] {
+			marker = green + " ✓ override" + reset
+		} else if overrideExcluded[t] {
+			marker = red + " ✗ override" + reset
+		} else if cliIncluded[t] {
+			marker = yellow + " ✓ cli" + reset
+		} else if cliExcluded[t] {
+			marker = dim + " ✗ cli" + reset
+		}
+		term.Printf("  %d) %s%s\n", i+1, t, marker)
 	}
 
 	input, ok := kr.ReadLine(term.Color(term.ColorCyan) + "> " + term.Color(term.ColorReset))

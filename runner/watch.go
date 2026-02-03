@@ -362,7 +362,34 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 				if keyReader == nil {
 					continue
 				}
-				overrides.testFilter = handleFilterTest(keyReader, testListsCache.get(), overrides.testFilter)
+				// Build trait maps for annotation
+			var ti *testTraitInfo
+			traitMaps := make(map[string]testfilter.TraitMap)
+			for _, p := range r.projects {
+				if !p.IsTest {
+					continue
+				}
+				projectDir := filepath.Join(r.gitRoot, p.Dir)
+				traitMaps[p.Name] = testfilter.BuildTraitMap(projectDir)
+			}
+			if len(traitMaps) > 0 {
+				// Merge CLI filter + interactive override to determine active category filters
+				cliFilter := extractFilter(r.opts.DotnetArgs)
+				inc, exc := parseCategoryFilters(cliFilter)
+				overInc, overExc := parseCategoryFilters(overrides.traitExpr)
+				for k := range overInc {
+					inc[k] = true
+				}
+				for k := range overExc {
+					exc[k] = true
+				}
+				ti = &testTraitInfo{
+					traitMaps: traitMaps,
+					included:  inc,
+					excluded:  exc,
+				}
+			}
+			overrides.testFilter = handleFilterTest(keyReader, testListsCache.get(), overrides.testFilter, ti)
 				term.Println()
 				printWatchHint(&overrides)
 
@@ -370,7 +397,8 @@ func (r *Runner) runWatch(ctx context.Context, targets []*project.Project, argsH
 				if keyReader == nil {
 					continue
 				}
-				overrides.traitExpr = handleFilterTrait(keyReader, r.projects, r.gitRoot, overrides.traitExpr)
+				userFilter := extractFilter(r.opts.DotnetArgs)
+				overrides.traitExpr = handleFilterTrait(keyReader, r.projects, r.gitRoot, overrides.traitExpr, userFilter)
 				term.Println()
 				printWatchHint(&overrides)
 			}

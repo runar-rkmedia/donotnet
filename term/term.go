@@ -248,6 +248,14 @@ func (t *Terminal) ClearLine() {
 	}
 }
 
+// ClearLines moves cursor up n lines and clears from cursor to end of screen.
+func (t *Terminal) ClearLines(n int) {
+	if t.plain || n <= 0 {
+		return
+	}
+	fmt.Fprintf(t.w, "\033[%dA\033[J", n)
+}
+
 // Status prints a status message that overwrites the current line
 func (t *Terminal) Status(format string, args ...any) {
 	if !t.progress {
@@ -366,6 +374,7 @@ func Color(code string) string         { return Default.Color(code) }
 func Write(p []byte) (int, error)      { return Default.Write(p) }
 func Println(args ...any)              { Default.Println(args...) }
 func ClearLine()                       { Default.ClearLine() }
+func ClearLines(n int)                 { Default.ClearLines(n) }
 func Status(format string, args ...any) { Default.Status(format, args...) }
 func ResultLine(success bool, skipIndicator, paddedName, durationStr, stats, filterInfo string) {
 	Default.ResultLine(success, skipIndicator, paddedName, durationStr, stats, filterInfo)

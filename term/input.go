@@ -95,6 +95,46 @@ func (k *KeyReader) ReadLine(prompt string) (string, bool) {
 	return "", false
 }
 
+// ReadLineFiltered reads a line of text, calling onChange after each keystroke.
+// onChange receives the current input and returns the number of lines it printed.
+// Those lines are cleared before the next onChange call.
+// Returns the entered string on Enter, or ("", false) if cancelled.
+func (k *KeyReader) ReadLineFiltered(prompt string, onChange func(input string) int) (string, bool) {
+	prevLines := onChange("")
+	fmt.Fprint(os.Stderr, prompt)
+
+	var line []byte
+	for b := range k.ch {
+		switch {
+		case b == '\r' || b == '\n':
+			fmt.Fprint(os.Stderr, "\r\n")
+			return string(line), true
+		case b == 3: // Ctrl-C
+			fmt.Fprint(os.Stderr, "\r\n")
+			return "", false
+		case b == 27: // Escape
+			fmt.Fprint(os.Stderr, "\r\n")
+			return "", false
+		case b == 127 || b == 8: // Backspace / DEL
+			if len(line) > 0 {
+				line = line[:len(line)-1]
+			}
+		case b >= 32: // Printable
+			line = append(line, b)
+		default:
+			continue
+		}
+
+		// Clear previous output (rendered lines + prompt line)
+		ClearLines(prevLines + 1)
+
+		// Re-render filtered list and prompt
+		prevLines = onChange(string(line))
+		fmt.Fprint(os.Stderr, prompt+string(line))
+	}
+	return "", false
+}
+
 // Close restores the terminal to its original state and stops the reader.
 func (k *KeyReader) Close() error {
 	select {

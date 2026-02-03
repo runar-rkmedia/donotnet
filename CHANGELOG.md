@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0] - 2026-02-03
+
+### Bug Fixes
+
+- Watch all file types instead of only .NET source extensions
+- Resolve relative paths against git root, not CWD
+- Kill dotnet process on first test failure without -k
+- Smarter --no-restore detection and retry, suppress MSBuild warnings
+- Qol for watcher, with some sensible options to help filtering.
+
+### Features
+
+- Add interactive keyboard input to watch mode
+- Reprint clean results table at end when builds have failures
+
+### Performance
+
+- Run e2e tests in parallel (53s → 10s)
+
 ## [0.2.0] - 2026-01-29
 
 ### Bug Fixes
