@@ -907,7 +907,7 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 		projectCommand = "build"
 	}
 
-	args := []string{projectCommand, projectPath, "--property:WarningLevel=0"}
+	args := []string{projectCommand, projectPath, "--property:WarningLevel=0", "-clp:ErrorsOnly"}
 
 	// Auto-detect if we can skip restore/build
 	hasNoRestore := false
@@ -1055,7 +1055,7 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 
 	// Retry with restore if needed
 	if err != nil && skippedRestore && needsRestoreRetry(outputStr) {
-		term.Verbose("  [%s] retrying with restore (missing NuGet packages)", p.Name)
+		term.Warnf("  [%s] retrying with restore (--no-restore was auto-applied but packages are missing)", p.Name)
 
 		retryArgs := make([]string, 0, len(args))
 		for _, arg := range args {

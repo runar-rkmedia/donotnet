@@ -45,7 +45,7 @@ func (r *Runner) runSolutionCommand(ctx context.Context, sln *project.Solution, 
 
 	// Build command args
 	slnPath := filepath.Join(r.gitRoot, sln.RelPath)
-	args := []string{r.opts.Command, slnPath, "--property:WarningLevel=0"}
+	args := []string{r.opts.Command, slnPath, "--property:WarningLevel=0", "-clp:ErrorsOnly"}
 	if r.opts.Coverage && r.opts.Command == "test" {
 		args = append(args, "--collect:XPlat Code Coverage")
 	}
@@ -200,7 +200,7 @@ func (r *Runner) runSolutionGroups(ctx context.Context, slnGroups map[*project.S
 
 				slnStart := time.Now()
 				slnPath := filepath.Join(r.gitRoot, job.sln.RelPath)
-				args := []string{r.opts.Command, slnPath, "--property:WarningLevel=0"}
+				args := []string{r.opts.Command, slnPath, "--property:WarningLevel=0", "-clp:ErrorsOnly"}
 				if r.opts.Coverage && r.opts.Command == "test" {
 					args = append(args, "--collect:XPlat Code Coverage")
 				}

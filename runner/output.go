@@ -210,6 +210,7 @@ func needsRestoreRetry(output string) bool {
 		"Please restore this project",
 		"project.assets.json' not found",
 		"NETSDK1004:",         // Missing assets file
+		"NETSDK1064:",         // Package not found / deleted since restore
 		"NU1101:",             // Unable to find package
 		"The project file could not be loaded",
 	}

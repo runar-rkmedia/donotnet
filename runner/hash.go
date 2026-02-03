@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	ignore "github.com/sabhiram/go-gitignore"
 	"github.com/runar-rkmedia/donotnet/project"
@@ -116,9 +117,21 @@ func ComputeContentHash(root string, dirs []string) string {
 	return fmt.Sprintf("%x", h.Sum(nil)[:8])
 }
 
+// restoreRelevantExts lists file extensions that can affect NuGet restore.
+var restoreRelevantExts = []string{".csproj", ".props", ".targets"}
+
+// restoreRelevantFiles lists specific filenames (case-insensitive) that affect restore
+// and can appear in any directory up to the git root.
+var restoreRelevantFiles = []string{
+	"directory.build.props",
+	"directory.build.targets",
+	"directory.packages.props",
+	"nuget.config",
+}
+
 // canSkipRestore checks if --no-restore can be safely used.
 // Returns true if obj/project.assets.json exists and is newer than
-// any .csproj file in the project or its transitive dependencies.
+// any restore-relevant file in the project, its dependencies, or ancestor directories.
 func canSkipRestore(projectPath string, relevantDirs []string, gitRoot string) bool {
 	projectDir := filepath.Dir(projectPath)
 	assetsPath := filepath.Join(projectDir, "obj", "project.assets.json")
@@ -127,33 +140,72 @@ func canSkipRestore(projectPath string, relevantDirs []string, gitRoot string) b
 	if err != nil {
 		return false
 	}
+	assetsTime := assetsInfo.ModTime()
 
-	// Check if any .csproj in the project or its dependencies is newer than assets.json
+	// Check restore-relevant files in project and dependency directories
 	for _, dir := range relevantDirs {
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(gitRoot, dir)
 		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
+		if newerRestoreFile(dir, assetsTime) {
+			return false
 		}
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			if strings.HasSuffix(strings.ToLower(entry.Name()), ".csproj") {
-				info, err := entry.Info()
-				if err != nil {
-					continue
-				}
-				if info.ModTime().After(assetsInfo.ModTime()) {
-					return false
-				}
-			}
+	}
+
+	// Walk ancestor directories from the project up to gitRoot, checking for
+	// Directory.Build.props, Directory.Packages.props, nuget.config, etc.
+	for dir := projectDir; ; dir = filepath.Dir(dir) {
+		if anyFileNewer(dir, restoreRelevantFiles, assetsTime) {
+			return false
+		}
+		if dir == gitRoot || dir == filepath.Dir(dir) {
+			break
 		}
 	}
 
 	return true
+}
+
+// newerRestoreFile returns true if dir contains any file with a restore-relevant
+// extension that is newer than the given time.
+func newerRestoreFile(dir string, than time.Time) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		for _, ext := range restoreRelevantExts {
+			if strings.HasSuffix(name, ext) {
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
+				if info.ModTime().After(than) {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
+}
+
+// anyFileNewer returns true if any of the named files exist in dir and are newer than the given time.
+func anyFileNewer(dir string, names []string, than time.Time) bool {
+	for _, name := range names {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(than) {
+			return true
+		}
+	}
+	return false
 }
 
 // canSkipBuild checks if --no-build can be safely used.
