@@ -518,7 +518,12 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 	stopNewJobs := make(chan struct{})
 	var stopOnce sync.Once
 	signalStop := func() {
-		stopOnce.Do(func() { close(stopNewJobs) })
+		stopOnce.Do(func() {
+			close(stopNewJobs)
+			if !r.opts.KeepGoing {
+				cancel() // Kill running dotnet processes immediately
+			}
+		})
 	}
 
 	// Start workers

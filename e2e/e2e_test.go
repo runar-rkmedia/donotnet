@@ -523,7 +523,131 @@ func TestQuietFlag(t *testing.T) {
 	assertNotContains(t, r, "Running test on")
 }
 
-// --- Keep-going ---
+// --- Fail-fast (default) and keep-going ---
+
+func TestFailingTestExitsNonZero(t *testing.T) {
+	t.Parallel()
+	needsDotnet(t)
+	dir := setupFixtureWithGit(t)
+
+	// Introduce a failing test
+	modifyFile(t, filepath.Join(dir, "Core.Tests", "CalculatorTests.cs"), `using Core;
+using Xunit;
+
+namespace Core.Tests;
+
+public class CalculatorTests
+{
+    private readonly Calculator _calc = new();
+
+    [Fact]
+    public void Add_ReturnsSum()
+    {
+        Assert.Equal(5, _calc.Add(2, 3));
+    }
+
+    [Fact]
+    public void Subtract_ReturnsDifference()
+    {
+        Assert.Equal(1, _calc.Subtract(3, 2));
+    }
+
+    [Fact]
+    public void Multiply_ReturnsProduct()
+    {
+        Assert.Equal(999, _calc.Multiply(2, 3)); // deliberately wrong
+    }
+}
+`)
+
+	// Without -k, should exit non-zero on test failure
+	r := runCLI(t, binaryPath, dir, "test", "--force")
+	assertExit(t, r, 1)
+	assertContains(t, r, "failed")
+}
+
+func TestFailingTestWithKeepGoingExitsNonZero(t *testing.T) {
+	t.Parallel()
+	needsDotnet(t)
+	dir := setupFixtureWithGit(t)
+
+	// Introduce a failing test
+	modifyFile(t, filepath.Join(dir, "Core.Tests", "CalculatorTests.cs"), `using Core;
+using Xunit;
+
+namespace Core.Tests;
+
+public class CalculatorTests
+{
+    private readonly Calculator _calc = new();
+
+    [Fact]
+    public void Add_ReturnsSum()
+    {
+        Assert.Equal(5, _calc.Add(2, 3));
+    }
+
+    [Fact]
+    public void Subtract_ReturnsDifference()
+    {
+        Assert.Equal(1, _calc.Subtract(3, 2));
+    }
+
+    [Fact]
+    public void Multiply_ReturnsProduct()
+    {
+        Assert.Equal(999, _calc.Multiply(2, 3)); // deliberately wrong
+    }
+}
+`)
+
+	// With -k, should also exit non-zero (but continue running all projects)
+	r := runCLI(t, binaryPath, dir, "test", "--force", "--keep-going")
+	assertExit(t, r, 1)
+	assertContains(t, r, "failed")
+}
+
+func TestFailFastStopsAtFirstFailure(t *testing.T) {
+	t.Parallel()
+	needsDotnet(t)
+	dir := setupFixtureWithGit(t)
+
+	// Single test project with one fast-failing test and one slow test.
+	// If fail-fast works, the tool should detect the failure in dotnet's
+	// stdout mid-run and kill the process, not waiting for the slow test.
+	modifyFile(t, filepath.Join(dir, "Core.Tests", "CalculatorTests.cs"), `using Core;
+using Xunit;
+
+namespace Core.Tests;
+
+public class CalculatorTests
+{
+    private readonly Calculator _calc = new();
+
+    [Fact]
+    public void Add_ReturnsSum()
+    {
+        Assert.Equal(999, _calc.Add(2, 3)); // fails immediately
+    }
+
+    [Fact]
+    public void SlowTest()
+    {
+        System.Threading.Thread.Sleep(30000); // 30 seconds
+        Assert.True(true);
+    }
+}
+`)
+
+	// Without -k: should detect the failure mid-stream, kill dotnet, and
+	// exit well before the 30s sleep completes.
+	r := runCLI(t, binaryPath, dir, "test", "--force")
+	assertExit(t, r, 1)
+
+	if r.Duration > 25*time.Second {
+		t.Errorf("fail-fast did not exit early: took %v (slow test sleeps 30s)", r.Duration)
+	}
+}
 
 func TestKeepGoing(t *testing.T) {
 	t.Parallel()
