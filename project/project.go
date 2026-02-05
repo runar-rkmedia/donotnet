@@ -298,17 +298,32 @@ func FindAffectedProjects(changed map[string]bool, graph map[string][]string, pr
 	return affected
 }
 
+// buildProjectByAbsPath maps absolute project paths to their Project pointers.
+func buildProjectByAbsPath(projects []*Project, gitRoot string) map[string]*Project {
+	m := make(map[string]*Project, len(projects))
+	for _, p := range projects {
+		absPath := filepath.Join(gitRoot, p.Path)
+		m[absPath] = p
+	}
+	return m
+}
+
+// collectRemaining returns projects not present in the assigned set.
+func collectRemaining(projects []*Project, assigned map[string]bool) []*Project {
+	var remaining []*Project
+	for _, p := range projects {
+		if !assigned[p.Path] {
+			remaining = append(remaining, p)
+		}
+	}
+	return remaining
+}
+
 // FindCompleteSolutionMatches finds solutions where ALL projects in the solution are in the target list.
 // Returns: map of solution -> projects in that solution, and slice of projects not matched to any solution.
 func FindCompleteSolutionMatches(projects []*Project, solutions []*Solution, gitRoot string) (map[*Solution][]*Project, []*Project) {
-	// Build set of absolute project paths -> project
-	projectByPath := make(map[string]*Project)
-	for _, p := range projects {
-		absPath := filepath.Join(gitRoot, p.Path)
-		projectByPath[absPath] = p
-	}
+	projectByPath := buildProjectByAbsPath(projects, gitRoot)
 
-	// Track which projects are assigned to a solution
 	assigned := make(map[string]bool)
 	result := make(map[*Solution][]*Project)
 
@@ -343,29 +358,15 @@ func FindCompleteSolutionMatches(projects []*Project, solutions []*Solution, git
 		}
 	}
 
-	// Collect remaining unassigned projects
-	var remaining []*Project
-	for _, p := range projects {
-		if !assigned[p.Path] {
-			remaining = append(remaining, p)
-		}
-	}
-
-	return result, remaining
+	return result, collectRemaining(projects, assigned)
 }
 
 // GroupProjectsBySolution groups projects by which solution contains them.
 // Prefers solutions that contain more projects.
 // Returns: map of solution -> projects in that solution, and slice of projects not in any solution.
 func GroupProjectsBySolution(projects []*Project, solutions []*Solution, gitRoot string) (map[*Solution][]*Project, []*Project) {
-	// Build set of absolute project paths -> project
-	projectByPath := make(map[string]*Project)
-	for _, p := range projects {
-		absPath := filepath.Join(gitRoot, p.Path)
-		projectByPath[absPath] = p
-	}
+	projectByPath := buildProjectByAbsPath(projects, gitRoot)
 
-	// Track which projects are assigned to a solution
 	assigned := make(map[string]bool)
 	result := make(map[*Solution][]*Project)
 
@@ -410,15 +411,7 @@ func GroupProjectsBySolution(projects []*Project, solutions []*Solution, gitRoot
 		}
 	}
 
-	// Collect remaining unassigned projects
-	var remaining []*Project
-	for _, p := range projects {
-		if !assigned[p.Path] {
-			remaining = append(remaining, p)
-		}
-	}
-
-	return result, remaining
+	return result, collectRemaining(projects, assigned)
 }
 
 // FindCommonSolution returns a solution that contains all the given projects, or nil if none exists.
@@ -427,17 +420,12 @@ func FindCommonSolution(projects []*Project, solutions []*Solution, gitRoot stri
 		return nil
 	}
 
-	// Build set of absolute project paths
-	projectPaths := make(map[string]bool)
-	for _, p := range projects {
-		absPath := filepath.Join(gitRoot, p.Path)
-		projectPaths[absPath] = true
-	}
+	projectByPath := buildProjectByAbsPath(projects, gitRoot)
 
 	// Find a solution that contains ALL projects
 	for _, sln := range solutions {
 		allFound := true
-		for projPath := range projectPaths {
+		for projPath := range projectByPath {
 			if !sln.Projects[projPath] {
 				allFound = false
 				break
