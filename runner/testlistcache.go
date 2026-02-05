@@ -26,9 +26,7 @@ func newTestListCache(db *cache.DB, gitRoot string, forwardGraph map[string][]st
 }
 
 func (c *testListCacheImpl) LookupTestList(p *project.Project) []string {
-	relevantDirs := project.GetRelevantDirs(p, c.forwardGraph)
-	contentHash := ComputeContentHash(c.gitRoot, relevantDirs)
-	key := cache.MakeKey(contentHash, c.argsHash, p.Path)
+	key := ProjectCacheKey(p, c.gitRoot, c.forwardGraph, c.argsHash)
 
 	result := c.db.Lookup(key)
 	if result == nil || len(result.Output) == 0 {
@@ -43,9 +41,7 @@ func (c *testListCacheImpl) LookupTestList(p *project.Project) []string {
 }
 
 func (c *testListCacheImpl) StoreTestList(p *project.Project, tests []string) {
-	relevantDirs := project.GetRelevantDirs(p, c.forwardGraph)
-	contentHash := ComputeContentHash(c.gitRoot, relevantDirs)
-	key := cache.MakeKey(contentHash, c.argsHash, p.Path)
+	key := ProjectCacheKey(p, c.gitRoot, c.forwardGraph, c.argsHash)
 
 	output := strings.Join(tests, "\n")
 	c.db.Mark(key, time.Now(), true, []byte(output), "list-tests")

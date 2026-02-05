@@ -261,9 +261,7 @@ func (r *Runner) Run(ctx context.Context) error {
 					continue
 				}
 				// Re-check cache with build-specific hash
-				relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
-				contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-				key := cache.MakeKey(contentHash, buildArgsHash, p.Path)
+				key := ProjectCacheKey(p, r.gitRoot, r.forwardGraph, buildArgsHash)
 				if !r.opts.Force && r.db.Lookup(key) != nil {
 					cachedProjects = append(cachedProjects, p)
 					continue
@@ -337,9 +335,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			})
 			term.Println()
 			for _, p := range sorted {
-				relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
-				contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-				key := cache.MakeKey(contentHash, argsHash, p.Path)
+				key := ProjectCacheKey(p, r.gitRoot, r.forwardGraph, argsHash)
 				if result := r.db.Lookup(key); result != nil && len(result.Output) > 0 {
 					term.Printf("=== %s ===\n%s\n", p.Name, string(result.Output))
 				}
@@ -394,9 +390,7 @@ func (r *Runner) findChangedProjects(argsHash string, vcsChangedFiles []string, 
 
 // projectChanged checks if a project needs to be rebuilt/retested.
 func (r *Runner) projectChanged(p *project.Project, argsHash string) bool {
-	relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
-	contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-	key := cache.MakeKey(contentHash, argsHash, p.Path)
+	key := ProjectCacheKey(p, r.gitRoot, r.forwardGraph, argsHash)
 
 	if r.opts.Force {
 		term.Verbose("  forced: %s (key=%s)", p.Name, key)
@@ -658,9 +652,7 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 						cacheArgsHash = buildArgsHash
 						cacheArgsForCache = buildArgsForCache
 					}
-					relevantDirs := project.GetRelevantDirs(res.project, r.forwardGraph)
-					contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-					key := cache.MakeKey(contentHash, cacheArgsHash, res.project.Path)
+					key := ProjectCacheKey(res.project, r.gitRoot, r.forwardGraph, cacheArgsHash)
 					r.db.Mark(key, now, res.success, []byte(res.output), cacheArgsForCache)
 				}
 				if res.success {
@@ -736,17 +728,13 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 					cacheArgsHash = buildArgsHash
 					cacheArgsForCache = buildArgsForCache
 				}
-				relevantDirs := project.GetRelevantDirs(res.project, r.forwardGraph)
-				contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-				key := cache.MakeKey(contentHash, cacheArgsHash, res.project.Path)
+				key := ProjectCacheKey(res.project, r.gitRoot, r.forwardGraph, cacheArgsHash)
 				r.db.Mark(key, now, true, []byte(res.output), cacheArgsForCache)
 
 				// Mark transitive dependencies
 				for _, depPath := range project.GetTransitiveDependencies(res.project.Path, r.forwardGraph) {
 					if dep, ok := r.projectsByPath[depPath]; ok {
-						depRelevantDirs := project.GetRelevantDirs(dep, r.forwardGraph)
-						depContentHash := ComputeContentHash(r.gitRoot, depRelevantDirs)
-						depKey := cache.MakeKey(depContentHash, cacheArgsHash, dep.Path)
+						depKey := ProjectCacheKey(dep, r.gitRoot, r.forwardGraph, cacheArgsHash)
 						r.db.Mark(depKey, now, true, nil, cacheArgsForCache)
 					}
 				}
@@ -759,9 +747,7 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 					cacheArgsHash = buildArgsHash
 					cacheArgsForCache = buildArgsForCache
 				}
-				relevantDirs := project.GetRelevantDirs(res.project, r.forwardGraph)
-				contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-				key := cache.MakeKey(contentHash, cacheArgsHash, res.project.Path)
+				key := ProjectCacheKey(res.project, r.gitRoot, r.forwardGraph, cacheArgsHash)
 				r.db.Mark(key, time.Now(), false, []byte(res.output), cacheArgsForCache)
 
 				alreadyPrinted := false
@@ -893,9 +879,7 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 		}
 
 		for _, p := range cached {
-			relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
-			contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-			key := cache.MakeKey(contentHash, argsHash, p.Path)
+			key := ProjectCacheKey(p, r.gitRoot, r.forwardGraph, argsHash)
 			if result := r.db.Lookup(key); result != nil && len(result.Output) > 0 {
 				outputs = append(outputs, outputEntry{p.Name, string(result.Output)})
 			}

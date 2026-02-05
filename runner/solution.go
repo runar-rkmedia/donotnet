@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/runar-rkmedia/donotnet/cache"
 	"github.com/runar-rkmedia/donotnet/project"
 	"github.com/runar-rkmedia/donotnet/term"
 )
@@ -110,9 +109,7 @@ func (r *Runner) runSolutionCommand(ctx context.Context, sln *project.Solution, 
 	// Mark cache for all projects in the solution
 	now := time.Now()
 	for _, p := range projects {
-		relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
-		contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-		key := cache.MakeKey(contentHash, argsHash, p.Path)
+		key := ProjectCacheKey(p, r.gitRoot, r.forwardGraph, argsHash)
 		r.db.Mark(key, now, success, nil, argsForCache)
 	}
 
@@ -282,9 +279,7 @@ func (r *Runner) runSolutionGroups(ctx context.Context, slnGroups map[*project.S
 
 		now := time.Now()
 		for _, p := range res.projects {
-			relevantDirs := project.GetRelevantDirs(p, r.forwardGraph)
-			contentHash := ComputeContentHash(r.gitRoot, relevantDirs)
-			key := cache.MakeKey(contentHash, argsHash, p.Path)
+			key := ProjectCacheKey(p, r.gitRoot, r.forwardGraph, argsHash)
 			r.db.Mark(key, now, res.success, nil, argsForCache)
 		}
 

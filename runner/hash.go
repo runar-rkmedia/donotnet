@@ -11,8 +11,17 @@ import (
 	"time"
 
 	ignore "github.com/sabhiram/go-gitignore"
+	"github.com/runar-rkmedia/donotnet/cache"
 	"github.com/runar-rkmedia/donotnet/project"
 )
+
+// ProjectCacheKey computes the cache key for a project by hashing its
+// relevant source files and combining with the args hash.
+func ProjectCacheKey(p *project.Project, gitRoot string, forwardGraph map[string][]string, argsHash string) string {
+	relevantDirs := project.GetRelevantDirs(p, forwardGraph)
+	contentHash := ComputeContentHash(gitRoot, relevantDirs)
+	return cache.MakeKey(contentHash, argsHash, p.Path)
+}
 
 // HashArgs creates a hash of command arguments for cache keys.
 func HashArgs(args []string) string {

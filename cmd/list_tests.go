@@ -89,9 +89,7 @@ By default outputs JSON. Use --json=false for plain text output.`,
 			}
 
 			// Check cache
-			relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
-			contentHash := runner.ComputeContentHash(scan.GitRoot, relevantDirs)
-			key := cache.MakeKey(contentHash, argsHash, p.Path)
+			key := runner.ProjectCacheKey(p, scan.GitRoot, scan.ForwardGraph, argsHash)
 
 			var testNames []string
 			cached := false
