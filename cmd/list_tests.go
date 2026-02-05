@@ -65,25 +65,15 @@ By default outputs JSON. Use --json=false for plain text output.`,
 		// When --affected is set, scope to affected projects only
 		var affectedSet map[string]bool
 		if listTestsAffected {
-			vcsChangedFiles := git.GetDirtyFiles(scan.GitRoot)
-			useVcsFilter := len(vcsChangedFiles) > 0
-			testArgsHash := runner.HashArgs([]string{"test"})
-
-			changed := make(map[string]bool)
-			for _, p := range scan.Projects {
-				relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
-				if useVcsFilter {
-					projectVcsFiles := project.FilterFilesToProject(vcsChangedFiles, relevantDirs)
-					if len(projectVcsFiles) == 0 {
-						continue
-					}
-				}
-				contentHash := runner.ComputeContentHash(scan.GitRoot, relevantDirs)
-				key := cache.MakeKey(contentHash, testArgsHash, p.Path)
-				if flagForce || db.Lookup(key) == nil {
-					changed[p.Path] = true
-				}
-			}
+			changed := FindChangedProjects(FindChangedOpts{
+				Projects:     scan.Projects,
+				ForwardGraph: scan.ForwardGraph,
+				GitRoot:      scan.GitRoot,
+				DB:           db,
+				ArgsHash:     runner.HashArgs([]string{"test"}),
+				VcsFiles:     git.GetDirtyFiles(scan.GitRoot),
+				Force:        flagForce,
+			})
 			affectedSet = project.FindAffectedProjects(changed, scan.Graph, scan.Projects)
 			term.Verbose("Affected projects: %d", len(affectedSet))
 		}
@@ -188,4 +178,3 @@ func init() {
 	listTestsCmd.Flags().BoolVar(&listTestsAffected, "affected", false, "Only list tests from affected projects (VCS-changed + cache miss)")
 	listCmd.AddCommand(listTestsCmd)
 }
-

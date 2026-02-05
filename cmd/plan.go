@@ -46,16 +46,13 @@ and identifying potential bottlenecks.`,
 		}
 		defer db.Close()
 
-		argsHash := runner.HashArgs([]string{"test"})
-		changed := make(map[string]bool)
-		for _, p := range scan.Projects {
-			relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
-			contentHash := runner.ComputeContentHash(scan.GitRoot, relevantDirs)
-			key := cache.MakeKey(contentHash, argsHash, p.Path)
-			if db.Lookup(key) == nil {
-				changed[p.Path] = true
-			}
-		}
+		changed := FindChangedProjects(FindChangedOpts{
+			Projects:     scan.Projects,
+			ForwardGraph: scan.ForwardGraph,
+			GitRoot:      scan.GitRoot,
+			DB:           db,
+			ArgsHash:     runner.HashArgs([]string{"test"}),
+		})
 
 		affected := project.FindAffectedProjects(changed, scan.Graph, scan.Projects)
 

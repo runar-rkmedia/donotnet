@@ -41,8 +41,6 @@ Projects can be filtered by type:
 				return err
 			}
 		}
-		useVcsFilter := len(vcsChangedFiles) > 0
-
 		// Open cache to find changed projects
 		cacheDir := ""
 		if cfg != nil && cfg.CacheDir != "" {
@@ -60,23 +58,15 @@ Projects can be filtered by type:
 		defer db.Close()
 
 		// Find changed projects by checking cache + VCS filter
-		argsHash := runner.HashArgs([]string{"test"})
-		changed := make(map[string]bool)
-		for _, p := range scan.Projects {
-			relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
-			if useVcsFilter {
-				projectVcsFiles := project.FilterFilesToProject(vcsChangedFiles, relevantDirs)
-				if len(projectVcsFiles) == 0 {
-					continue
-				}
-			}
-
-			contentHash := runner.ComputeContentHash(scan.GitRoot, relevantDirs)
-			key := cache.MakeKey(contentHash, argsHash, p.Path)
-			if flagForce || db.Lookup(key) == nil {
-				changed[p.Path] = true
-			}
-		}
+		changed := FindChangedProjects(FindChangedOpts{
+			Projects:     scan.Projects,
+			ForwardGraph: scan.ForwardGraph,
+			GitRoot:      scan.GitRoot,
+			DB:           db,
+			ArgsHash:     runner.HashArgs([]string{"test"}),
+			VcsFiles:     vcsChangedFiles,
+			Force:        flagForce,
+		})
 
 		affected := project.FindAffectedProjects(changed, scan.Graph, scan.Projects)
 
