@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 )
 
 // Project represents a parsed .csproj file.
@@ -32,11 +31,10 @@ var projectRefRegex = regexp.MustCompile(`<ProjectReference\s+Include="([^"]+)"`
 var packageRefRegex = regexp.MustCompile(`<PackageReference\s+Include="([^"]+)"`)
 var slnProjectRegex = regexp.MustCompile(`Project\("[^"]+"\)\s*=\s*"[^"]+",\s*"([^"]+\.csproj)"`)
 
-// FindProjects finds all .csproj files in the scan root and returns parsed Project structs.
-// Paths are stored relative to gitRoot for consistent cache keys.
-func FindProjects(scanRoot, gitRoot string) ([]*Project, error) {
+// Discover walks scanRoot once to find all .csproj and .sln files.
+func Discover(scanRoot, gitRoot string) ([]*Project, []*Solution, error) {
 	var projects []*Project
-	var mu sync.Mutex
+	var solutions []*Solution
 
 	err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -44,45 +42,19 @@ func FindProjects(scanRoot, gitRoot string) ([]*Project, error) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			// Skip common non-project directories
 			if name == ".git" || name == "node_modules" || name == "bin" || name == "obj" || name == ".vs" {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		if strings.HasSuffix(path, ".csproj") {
-			// Always use paths relative to git root for consistent cache keys
 			relPath, _ := filepath.Rel(gitRoot, path)
 			p, err := Parse(path, relPath)
 			if err != nil {
 				return nil
 			}
-			mu.Lock()
 			projects = append(projects, p)
-			mu.Unlock()
-		}
-		return nil
-	})
-
-	return projects, err
-}
-
-// FindSolutions finds all .sln files and parses their project references.
-func FindSolutions(scanRoot, gitRoot string) ([]*Solution, error) {
-	var solutions []*Solution
-
-	err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == ".git" || name == "node_modules" || name == "bin" || name == "obj" || name == ".vs" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(path, ".sln") {
+		} else if strings.HasSuffix(path, ".sln") {
 			content, err := os.ReadFile(path)
 			if err != nil {
 				return nil
@@ -90,30 +62,28 @@ func FindSolutions(scanRoot, gitRoot string) ([]*Solution, error) {
 
 			relPath, _ := filepath.Rel(gitRoot, path)
 			slnDir := filepath.Dir(path)
-			projects := make(map[string]bool)
+			slnProjects := make(map[string]bool)
 
 			matches := slnProjectRegex.FindAllStringSubmatch(string(content), -1)
 			for _, m := range matches {
 				projPath := m[1]
-				// Convert Windows path separators
 				projPath = strings.ReplaceAll(projPath, "\\", "/")
-				// Resolve to absolute path
 				absPath := filepath.Clean(filepath.Join(slnDir, projPath))
-				projects[absPath] = true
+				slnProjects[absPath] = true
 			}
 
-			if len(projects) > 0 {
+			if len(slnProjects) > 0 {
 				solutions = append(solutions, &Solution{
 					Path:     path,
 					RelPath:  relPath,
-					Projects: projects,
+					Projects: slnProjects,
 				})
 			}
 		}
 		return nil
 	})
 
-	return solutions, err
+	return projects, solutions, err
 }
 
 // Parse parses a .csproj file and returns a Project struct.

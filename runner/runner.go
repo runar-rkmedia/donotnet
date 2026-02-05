@@ -77,6 +77,19 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.scanRoot = cwd
 	}
 
+	// Discover projects and solutions before creating any cache artifacts,
+	// so we can bail out early in non-.NET repos without side effects.
+	r.projects, r.solutions, err = project.Discover(r.scanRoot, r.gitRoot)
+	if err != nil {
+		return fmt.Errorf("discovering projects: %w", err)
+	}
+
+	if len(r.projects) == 0 && len(r.solutions) == 0 {
+		term.Verbose("No .NET projects or solutions found, nothing to do")
+		return nil
+	}
+	term.Verbose("Found %d projects, %d solutions", len(r.projects), len(r.solutions))
+
 	// Setup cache
 	r.cacheDir = r.opts.CacheDir
 	if r.cacheDir == "" {
@@ -91,19 +104,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("opening cache: %w", err)
 	}
 	defer r.db.Close()
-
-	// Find projects and solutions
-	r.projects, err = project.FindProjects(r.scanRoot, r.gitRoot)
-	if err != nil {
-		return fmt.Errorf("finding projects: %w", err)
-	}
-	term.Verbose("Found %d projects", len(r.projects))
-
-	r.solutions, err = project.FindSolutions(r.scanRoot, r.gitRoot)
-	if err != nil {
-		return fmt.Errorf("finding solutions: %w", err)
-	}
-	term.Verbose("Found %d solutions", len(r.solutions))
 
 	// Build dependency graphs
 	r.graph = project.BuildDependencyGraph(r.projects, r.gitRoot)

@@ -36,14 +36,9 @@ func scanProjects() (*scanResult, error) {
 		scanRoot = cwd
 	}
 
-	projects, err := project.FindProjects(scanRoot, gitRoot)
+	projects, solutions, err := project.Discover(scanRoot, gitRoot)
 	if err != nil {
-		return nil, fmt.Errorf("finding projects: %w", err)
-	}
-
-	solutions, err := project.FindSolutions(scanRoot, gitRoot)
-	if err != nil {
-		return nil, fmt.Errorf("finding solutions: %w", err)
+		return nil, fmt.Errorf("discovering projects: %w", err)
 	}
 
 	return &scanResult{
