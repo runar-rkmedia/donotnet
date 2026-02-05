@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/runar-rkmedia/donotnet/project"
 )
 
 // TestFileSafetyResult contains the analysis of whether a test file is safe to filter on
@@ -128,8 +130,7 @@ func findReferencingFiles(projectDir string, excludeFile string, classNames []st
 
 		// Skip non-.cs files and non-test files
 		if d.IsDir() {
-			name := d.Name()
-			if name == "bin" || name == "obj" || name == ".git" {
+			if project.ShouldSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil

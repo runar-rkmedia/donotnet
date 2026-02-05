@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/runar-rkmedia/donotnet/project"
 )
 
 // Report represents parsed coverage data from a Cobertura XML file
@@ -217,8 +219,7 @@ func IsCoverageFresh(coverageFile string, coveredDirs []string, maxAge int64) bo
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
-				name := d.Name()
-				if name == "bin" || name == "obj" || name == "TestResults" || name == ".git" {
+				if project.ShouldSkipDir(d.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
