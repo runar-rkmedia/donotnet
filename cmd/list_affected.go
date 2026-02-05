@@ -63,15 +63,14 @@ Projects can be filtered by type:
 		argsHash := runner.HashArgs([]string{"test"})
 		changed := make(map[string]bool)
 		for _, p := range scan.Projects {
+			relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
 			if useVcsFilter {
-				relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
 				projectVcsFiles := project.FilterFilesToProject(vcsChangedFiles, relevantDirs)
 				if len(projectVcsFiles) == 0 {
 					continue
 				}
 			}
 
-			relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
 			contentHash := runner.ComputeContentHash(scan.GitRoot, relevantDirs)
 			key := cache.MakeKey(contentHash, argsHash, p.Path)
 			if flagForce || db.Lookup(key) == nil {

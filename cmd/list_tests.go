@@ -71,14 +71,13 @@ By default outputs JSON. Use --json=false for plain text output.`,
 
 			changed := make(map[string]bool)
 			for _, p := range scan.Projects {
+				relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
 				if useVcsFilter {
-					relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
 					projectVcsFiles := project.FilterFilesToProject(vcsChangedFiles, relevantDirs)
 					if len(projectVcsFiles) == 0 {
 						continue
 					}
 				}
-				relevantDirs := project.GetRelevantDirs(p, scan.ForwardGraph)
 				contentHash := runner.ComputeContentHash(scan.GitRoot, relevantDirs)
 				key := cache.MakeKey(contentHash, testArgsHash, p.Path)
 				if flagForce || db.Lookup(key) == nil {
