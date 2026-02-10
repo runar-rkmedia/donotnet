@@ -230,6 +230,7 @@ func checkStalenessMtime(gitRoot string) Status {
 func getFilesChangedSince(gitRoot string, since time.Time) []string {
 	filesMap := make(map[string]bool)
 
+	// Get files from commits since the given time
 	sinceStr := since.Format("2006-01-02T15:04:05")
 	cmd := exec.Command("git", "-C", gitRoot, "log", "--name-only", "--pretty=format:", "--since="+sinceStr)
 	out, err := cmd.Output()
@@ -242,6 +243,8 @@ func getFilesChangedSince(gitRoot string, since time.Time) []string {
 		}
 	}
 
+	// Get uncommitted files, but only include them if they were modified after 'since'
+	// This avoids false positives when coverage was built with uncommitted changes
 	cmd = exec.Command("git", "-C", gitRoot, "status", "--porcelain")
 	cmd.Dir = gitRoot
 	out, err = cmd.Output()
@@ -254,7 +257,16 @@ func getFilesChangedSince(gitRoot string, since time.Time) []string {
 			if idx := strings.Index(file, " -> "); idx >= 0 {
 				file = file[idx+4:]
 			}
-			if file != "" {
+			if file == "" {
+				continue
+			}
+			// Check if the file was actually modified after coverage was generated
+			absPath := filepath.Join(gitRoot, file)
+			info, statErr := os.Stat(absPath)
+			if statErr != nil {
+				continue
+			}
+			if info.ModTime().After(since) {
 				filesMap[file] = true
 			}
 		}
