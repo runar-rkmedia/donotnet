@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.4.0] - 2026-02-11
+
+### Bug Fixes
+
+- Skip cache dir creation and exit early in non-.NET repos
+- Correct coverage tip to use `donotnet coverage build`
+- Only show stale coverage for files modified after generation
+
+### Documentation
+
+- Update README to match current CLI structure
+
+### Features
+
+- Add path arguments and first-class --filter/-c flags
+- Show docstrings and file locations for failing tests
+- Show rerun hints after test failures
+
+### Miscellaneous
+
+- Ignore bin/obj in testdata directory
+
+### Refactor
+
+- Use project.ShouldSkipDir() in coverage and testfilter
+- Deduplicate GetRelevantDirs calls in list commands
+- Extract shared FindChangedProjects helper
+- Add ProjectCacheKey helper to reduce boilerplate
+- Extract shared helpers for solution matching functions
+
 ## [0.3.0] - 2026-02-03
 
 ### Bug Fixes

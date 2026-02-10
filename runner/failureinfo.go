@@ -99,6 +99,61 @@ func printFailureDocstrings(failures []runResult, gitRoot string) {
 	term.Printf("\n")
 }
 
+// printRerunHints prints helpful commands to rerun failed tests.
+func printRerunHints(failures []runResult) {
+	// Collect all failed test names
+	var failedTestNames []string
+	for _, f := range failures {
+		failedTests := testresults.ParseStdout(f.output)
+		for _, ft := range failedTests {
+			failedTestNames = append(failedTestNames, ft.FullyQualifiedName)
+		}
+	}
+
+	if len(failedTestNames) == 0 {
+		return
+	}
+
+	if term.IsPlain() {
+		term.Printf("--- Rerun Failed Tests ---\n")
+	} else {
+		term.Printf("%s--- Rerun Failed Tests ---%s\n", term.ColorCyan, term.ColorReset)
+	}
+
+	// Show filter command for specific test(s)
+	if len(failedTestNames) == 1 {
+		if term.IsPlain() {
+			term.Printf("  donotnet test --filter \"FullyQualifiedName=%s\"\n", failedTestNames[0])
+		} else {
+			term.Printf("  %sdonotnet test --filter \"FullyQualifiedName=%s\"%s\n",
+				term.ColorDim, failedTestNames[0], term.ColorReset)
+		}
+	} else {
+		// For multiple tests, show a filter with OR
+		if term.IsPlain() {
+			term.Printf("  donotnet test --filter \"FullyQualifiedName=%s\"\n", failedTestNames[0])
+			if len(failedTestNames) > 1 {
+				term.Printf("  (or use --failed to rerun all %d failed tests)\n", len(failedTestNames))
+			}
+		} else {
+			term.Printf("  %sdonotnet test --filter \"FullyQualifiedName=%s\"%s\n",
+				term.ColorDim, failedTestNames[0], term.ColorReset)
+			if len(failedTestNames) > 1 {
+				term.Printf("  %s(or use --failed to rerun all %d failed tests)%s\n",
+					term.ColorDim, len(failedTestNames), term.ColorReset)
+			}
+		}
+	}
+
+	// Always show the --failed option
+	if term.IsPlain() {
+		term.Printf("  donotnet test --failed\n")
+	} else {
+		term.Printf("  %sdonotnet test --failed%s\n", term.ColorDim, term.ColorReset)
+	}
+	term.Printf("\n")
+}
+
 // EnhanceFailureOutput processes test failure output to:
 // 1. Extract and display docstrings for failing tests
 // 2. Highlight file paths for better readability

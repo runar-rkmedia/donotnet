@@ -849,8 +849,9 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 						enhanced := EnhanceFailureOutput(res.output, r.gitRoot)
 						term.Printf("\n%s\n", enhanced)
 					}
-					// Print docstrings for this failure before exiting
+					// Print docstrings and rerun hints for this failure before exiting
 					printFailureDocstrings([]runResult{res}, r.gitRoot)
+					printRerunHints([]runResult{res})
 					cancel()
 					totalDuration := time.Since(startTime).Round(time.Millisecond)
 					term.Summary(succeeded, len(targets), len(cached), totalDuration, false)
@@ -884,6 +885,7 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 	if len(failures) > 0 {
 		// First, print docstrings for ALL failures (including direct-printed ones)
 		printFailureDocstrings(failures, r.gitRoot)
+		printRerunHints(failures)
 
 		// Then print full output for failures not already printed
 		unprintedFailures := 0
