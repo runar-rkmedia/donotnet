@@ -102,17 +102,17 @@ func GetSuggestion(gitRoot string, method StalenessMethod) (id, title, descripti
 	case NotFound:
 		return "coverage-not-found",
 			"Enable coverage-based test filtering",
-			"Run with --build-test-coverage to enable coverage-based test filtering"
+			"Run with `donotnet coverage build` to enable coverage-based test filtering"
 	case Stale:
 		if len(status.ChangedFiles) <= 3 {
 			return "coverage-stale",
 				"Update test coverage data",
-				fmt.Sprintf("Coverage may be stale (%s changed). Run --build-test-coverage to update",
+				fmt.Sprintf("Coverage may be stale (%s changed). Run `donotnet coverage build` to update",
 					strings.Join(status.ChangedFiles, ", "))
 		}
 		return "coverage-stale",
 			"Update test coverage data",
-			fmt.Sprintf("Coverage may be stale (%d file(s) changed). Run --build-test-coverage to update",
+			fmt.Sprintf("Coverage may be stale (%d file(s) changed). Run `donotnet coverage build` to update",
 				len(status.ChangedFiles))
 	}
 	return "", "", ""
