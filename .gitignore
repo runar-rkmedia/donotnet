@@ -107,6 +107,8 @@ dist/
 coverage-e2e.txt
 coverage-e2e.html
 
-### .NET build artifacts (e2e fixture) ###
+### .NET build artifacts ###
 e2e/testdata/**/bin/
 e2e/testdata/**/obj/
+testdata/**/bin/
+testdata/**/obj/
