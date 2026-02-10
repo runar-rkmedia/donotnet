@@ -109,12 +109,20 @@ func TestTestCommandFlags(t *testing.T) {
 		"full-build",
 		"no-solution",
 		"solution",
+		"filter",
+		"configuration",
 	}
 
 	for _, flag := range flags {
 		if testCmd.Flags().Lookup(flag) == nil {
 			t.Errorf("expected --%s flag on test command", flag)
 		}
+	}
+
+	// Check -c shorthand for configuration
+	f := testCmd.Flags().ShorthandLookup("c")
+	if f == nil {
+		t.Error("expected -c shorthand for --configuration on test command")
 	}
 }
 
@@ -127,12 +135,19 @@ func TestBuildCommandFlags(t *testing.T) {
 		"vcs-ref",
 		"watch",
 		"print-output",
+		"configuration",
 	}
 
 	for _, flag := range flags {
 		if buildCmd.Flags().Lookup(flag) == nil {
 			t.Errorf("expected --%s flag on build command", flag)
 		}
+	}
+
+	// Check -c shorthand for configuration
+	f := buildCmd.Flags().ShorthandLookup("c")
+	if f == nil {
+		t.Error("expected -c shorthand for --configuration on build command")
 	}
 }
 

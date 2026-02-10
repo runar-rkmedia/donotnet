@@ -24,6 +24,12 @@ func shouldAutoQuiet(args []string) bool {
 	return false
 }
 
+// ExtractFilter returns the --filter value from args, or "" if none.
+// Handles both "--filter" "value" and "--filter=value" forms.
+func ExtractFilter(args []string) string {
+	return extractFilter(args)
+}
+
 // extractFilter returns the --filter value from args, or "" if none.
 // Handles both "--filter" "value" and "--filter=value" forms.
 func extractFilter(args []string) string {

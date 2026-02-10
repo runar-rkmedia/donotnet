@@ -15,8 +15,12 @@ func checkForMisplacedDotnetArgs(command string, posArgs []string, dashDashArgs 
 		return nil
 	}
 	for _, arg := range posArgs {
+		// Skip args that look like path targets
+		if isPathArg(arg) {
+			continue
+		}
 		if looksLikeDotnetFilterExpr(arg) {
-			return fmt.Errorf("%q looks like a dotnet filter expression but was not passed after '--'.\n\nUse: donotnet %s -- --filter %q", arg, command, arg)
+			return fmt.Errorf("%q looks like a dotnet filter expression but was not passed after '--'.\n\nUse: donotnet %s -- --filter %q\n  or: donotnet %s --filter %q", arg, command, arg, command, arg)
 		}
 	}
 	return nil

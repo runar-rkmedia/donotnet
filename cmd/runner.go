@@ -16,6 +16,9 @@ type RunOptions struct {
 	// DotnetArgs are extra arguments passed to dotnet
 	DotnetArgs []string
 
+	// Targets are resolved absolute paths to specific .csproj, .sln, or directories
+	Targets []string
+
 	// Test-specific options
 	Coverage            bool
 	CoverageBuild       bool
@@ -49,6 +52,7 @@ func Run(opts *RunOptions) error {
 	// Override with command-specific options
 	runnerOpts.Command = opts.Command
 	runnerOpts.DotnetArgs = opts.DotnetArgs
+	runnerOpts.Targets = opts.Targets
 	runnerOpts.Force = opts.Force
 
 	// Test options

@@ -38,6 +38,10 @@ type Runner struct {
 	forwardGraph   map[string][]string
 	projectsByPath map[string]*project.Project
 	db             *cache.DB
+
+	// targetPaths is the set of project relative paths matched by explicit targets.
+	// When non-nil, only these projects are executed (and they bypass cache).
+	targetPaths map[string]bool
 }
 
 // New creates a new Runner with the given options.
@@ -89,6 +93,16 @@ func (r *Runner) Run(ctx context.Context) error {
 		return nil
 	}
 	term.Verbose("Found %d projects, %d solutions", len(r.projects), len(r.solutions))
+
+	// Filter projects by explicit targets (if specified)
+	if len(r.opts.Targets) > 0 {
+		matched, err := r.resolveTargetProjects()
+		if err != nil {
+			return err
+		}
+		r.targetPaths = matched
+		term.Verbose("Target filter: %d projects matched", len(matched))
+	}
 
 	// Setup cache
 	r.cacheDir = r.opts.CacheDir
@@ -179,6 +193,13 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// Find changed projects
 	changed := r.findChangedProjects(argsHash, vcsChangedFiles, useVcsFilter)
+
+	// When explicit targets are specified, force-mark them as changed
+	if r.targetPaths != nil {
+		for path := range r.targetPaths {
+			changed[path] = true
+		}
+	}
 	term.Verbose("Changed projects: %d", len(changed))
 
 	// Find affected projects
@@ -191,6 +212,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	for _, p := range r.projects {
 		// Filter by type for test command
 		if r.opts.Command == "test" && !p.IsTest {
+			continue
+		}
+
+		// When explicit targets are specified, only include matching projects
+		if r.targetPaths != nil && !r.targetPaths[p.Path] {
 			continue
 		}
 
@@ -408,6 +434,69 @@ func (r *Runner) projectChanged(p *project.Project, argsHash string) bool {
 
 	term.Verbose("  cache miss: %s (key=%s)", p.Name, key)
 	return true
+}
+
+// resolveTargetProjects maps absolute target paths (.csproj, .sln, dirs) to
+// the set of discovered project relative paths they match.
+func (r *Runner) resolveTargetProjects() (map[string]bool, error) {
+	matched := make(map[string]bool)
+
+	// Build lookup: absolute path -> project relative path
+	absByPath := make(map[string]string, len(r.projects))
+	for _, p := range r.projects {
+		abs := filepath.Join(r.gitRoot, p.Path)
+		absByPath[abs] = p.Path
+	}
+
+	// Build lookup: absolute sln path -> solution
+	slnByPath := make(map[string]*project.Solution, len(r.solutions))
+	for _, sln := range r.solutions {
+		slnByPath[sln.Path] = sln
+	}
+
+	for _, target := range r.opts.Targets {
+		ext := strings.ToLower(filepath.Ext(target))
+		matchedAny := false
+
+		switch ext {
+		case ".csproj":
+			// Match by absolute path
+			if relPath, ok := absByPath[target]; ok {
+				matched[relPath] = true
+				matchedAny = true
+			}
+
+		case ".sln":
+			// Find the solution and include all its projects
+			if sln, ok := slnByPath[target]; ok {
+				for projAbs := range sln.Projects {
+					if relPath, ok := absByPath[projAbs]; ok {
+						matched[relPath] = true
+						matchedAny = true
+					}
+				}
+			}
+
+		default:
+			// Directory: match all projects under this directory
+			targetDir := target
+			if !strings.HasSuffix(targetDir, string(filepath.Separator)) {
+				targetDir += string(filepath.Separator)
+			}
+			for abs, relPath := range absByPath {
+				if strings.HasPrefix(abs, targetDir) || filepath.Dir(abs) == target {
+					matched[relPath] = true
+					matchedAny = true
+				}
+			}
+		}
+
+		if !matchedAny {
+			return nil, fmt.Errorf("target %q did not match any discovered project", target)
+		}
+	}
+
+	return matched, nil
 }
 
 // runProjects runs the command on the given projects using a parallel worker pool

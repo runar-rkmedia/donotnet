@@ -21,6 +21,9 @@ type Options struct {
 	// DotnetArgs are extra arguments passed to dotnet after "--"
 	DotnetArgs []string
 
+	// Targets are resolved absolute paths to .csproj, .sln, or directories to scope the run
+	Targets []string
+
 	// --- Test-specific options ---
 	Coverage            bool
 	CoverageBuild       bool // Per-test coverage map build (donotnet coverage build)
