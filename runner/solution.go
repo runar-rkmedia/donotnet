@@ -273,7 +273,8 @@ func (r *Runner) runSolutionGroups(ctx context.Context, slnGroups map[*project.S
 				} else {
 					term.Printf("  %s✗%s %s %s\n", term.ColorRed, term.ColorReset, filepath.Base(res.sln.RelPath), res.duration.Round(time.Millisecond))
 				}
-				failedOutputs = append(failedOutputs, fmt.Sprintf("=== %s ===\n%s", filepath.Base(res.sln.RelPath), res.output))
+				enhanced := EnhanceFailureOutput(res.output, r.gitRoot)
+				failedOutputs = append(failedOutputs, fmt.Sprintf("=== %s ===\n%s", filepath.Base(res.sln.RelPath), enhanced))
 			}
 		}
 
@@ -289,7 +290,8 @@ func (r *Runner) runSolutionGroups(ctx context.Context, slnGroups map[*project.S
 			slnFailed += len(res.projects)
 			if !r.opts.KeepGoing {
 				cancel()
-				term.Printf("\n%s\n", res.output)
+				enhanced := EnhanceFailureOutput(res.output, r.gitRoot)
+				term.Printf("\n%s\n", enhanced)
 				term.Summary(slnSucceeded, totalProjects, len(cached), time.Since(startTime).Round(time.Millisecond), false)
 				return false
 			}

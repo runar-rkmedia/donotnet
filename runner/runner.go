@@ -603,9 +603,7 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 	signalStop := func() {
 		stopOnce.Do(func() {
 			close(stopNewJobs)
-			if !r.opts.KeepGoing {
-				cancel() // Kill running dotnet processes immediately
-			}
+			// Don't cancel here - worker will cancel after sending result
 		})
 	}
 
@@ -628,11 +626,8 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 
 				result := r.runSingleProject(ctx, p, argsHash, argsForCache, buildArgsHash, buildArgsForCache, filteredBuildArgs, status, signalStop)
 
-				select {
-				case <-ctx.Done():
-					return
-				case results <- result:
-				}
+				// Send result first (main loop needs it for docstrings/summary)
+				results <- result
 			}
 		}()
 	}
@@ -851,8 +846,11 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 
 				if !r.opts.KeepGoing {
 					if !alreadyPrinted {
-						term.Printf("\n%s\n", res.output)
+						enhanced := EnhanceFailureOutput(res.output, r.gitRoot)
+						term.Printf("\n%s\n", enhanced)
 					}
+					// Print docstrings for this failure before exiting
+					printFailureDocstrings([]runResult{res}, r.gitRoot)
 					cancel()
 					totalDuration := time.Since(startTime).Round(time.Millisecond)
 					term.Summary(succeeded, len(targets), len(cached), totalDuration, false)
@@ -872,6 +870,9 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 			closeJobsIfDone()
 
 		case <-ctx.Done():
+			// Context was cancelled after result was sent - this case shouldn't
+			// normally be reached since we process the result first, but handle
+			// it gracefully for edge cases
 			return false
 		}
 	}
@@ -879,8 +880,12 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 	clearStatus()
 	totalDuration := time.Since(startTime).Round(time.Millisecond)
 
-	// Print failure output
+	// Print failure output and docstrings
 	if len(failures) > 0 {
+		// First, print docstrings for ALL failures (including direct-printed ones)
+		printFailureDocstrings(failures, r.gitRoot)
+
+		// Then print full output for failures not already printed
 		unprintedFailures := 0
 		for _, f := range failures {
 			if !directPrinted[f.project.Name] {
@@ -891,7 +896,8 @@ func (r *Runner) runProjects(ctx context.Context, targets, cached []*project.Pro
 			term.Printf("\n--- Failure Output ---\n")
 			for _, f := range failures {
 				if !directPrinted[f.project.Name] {
-					term.Printf("\n=== %s ===\n%s\n", f.project.Name, f.output)
+					enhanced := EnhanceFailureOutput(f.output, r.gitRoot)
+					term.Printf("\n=== %s ===\n%s\n", f.project.Name, enhanced)
 				}
 			}
 		}
@@ -1119,15 +1125,21 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 		args = append(args, extraArgs...)
 	}
 
-	cmd := exec.CommandContext(ctx, "dotnet", args...)
+	// Create a separate context for this command so we can kill it for fail-fast
+	// without affecting the main context (which is needed for result processing)
+	cmdCtx, cmdCancel := context.WithCancel(ctx)
+	defer cmdCancel()
+
+	cmd := exec.CommandContext(cmdCtx, "dotnet", args...)
 	setupProcessGroup(cmd)
 
 	var output bytes.Buffer
 	lineWriter := &statusLineWriter{
-		project:   p,
-		status:    status,
-		buffer:    &output,
-		onFailure: signalStop,
+		project:     p,
+		status:      status,
+		buffer:      &output,
+		onFailure:   signalStop,
+		killProcess: cmdCancel, // Kill this specific process on failure
 	}
 	cmd.Stdout = lineWriter
 	cmd.Stderr = lineWriter

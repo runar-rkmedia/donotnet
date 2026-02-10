@@ -36,13 +36,14 @@ type statusUpdate struct {
 
 // statusLineWriter captures output and optionally streams it to the terminal.
 type statusLineWriter struct {
-	project    *project.Project
-	status     chan<- statusUpdate
-	buffer     *bytes.Buffer
-	lineBuf    []byte
-	onFailure  func() // Called once when failure detected
-	directMode bool
-	mu         sync.Mutex
+	project     *project.Project
+	status      chan<- statusUpdate
+	buffer      *bytes.Buffer
+	lineBuf     []byte
+	onFailure   func() // Called once when failure detected (signals stop)
+	killProcess func() // Called to kill the current process (for fail-fast)
+	directMode  bool
+	mu          sync.Mutex
 }
 
 var failurePatterns = []string{
@@ -113,9 +114,10 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 	directMode := w.directMode
 	w.mu.Unlock()
 
-	// In direct mode, just print to stderr
+	// In direct mode, print to stderr with path highlighting
 	if directMode {
-		term.Write(p)
+		enhanced := highlightPaths(string(p))
+		term.Write([]byte(enhanced))
 		return n, nil
 	}
 
@@ -157,10 +159,15 @@ func (w *statusLineWriter) Write(p []byte) (n int, err error) {
 					} else {
 						term.Status("  %s✗%s %s\n\n", term.ColorRed, term.ColorReset, w.project.Name)
 					}
-					// Print buffered output
-					term.Write(w.buffer.Bytes())
+					// Print buffered output with path highlighting
+					enhanced := highlightPaths(string(w.buffer.Bytes()))
+					term.Write([]byte(enhanced))
 					if w.onFailure != nil {
 						w.onFailure()
+					}
+					// Kill the current process for fail-fast
+					if w.killProcess != nil {
+						w.killProcess()
 					}
 				}
 				w.mu.Unlock()
