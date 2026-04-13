@@ -1030,10 +1030,19 @@ func (r *Runner) runSingleProject(ctx context.Context, p *project.Project, argsH
 
 		if projectCommand == "test" && !hasNoBuild {
 			if canSkipBuild(projectPath, relevantDirs, r.gitRoot) {
-				args = append(args, "--no-build")
-				hasNoBuild = true
-				skippedBuild = true
-				term.Verbose("  [%s] skipping build (up-to-date)", p.Name)
+				// When bin/ contains directories with spaces (e.g. "Any CPU"),
+				// dotnet test <csproj> --no-build can resolve the DLL to such
+				// a path, and vstest internally splits it at the space.
+				// In this case, skip the optimization and let dotnet rebuild
+				// into a clean output path.
+				if binHasSpacedDirs(projectPath) {
+					term.Verbose("  [%s] cannot skip build: output path contains spaces", p.Name)
+				} else {
+					args = append(args, "--no-build")
+					hasNoBuild = true
+					skippedBuild = true
+					term.Verbose("  [%s] skipping build (up-to-date)", p.Name)
+				}
 			} else {
 				term.Verbose("  [%s] cannot skip build: source files newer than DLL", p.Name)
 			}

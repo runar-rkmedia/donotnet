@@ -288,6 +288,24 @@ func canSkipBuild(projectPath string, relevantDirs []string, gitRoot string) boo
 	return !newerSourceFound
 }
 
+// binHasSpacedDirs checks if any directory under the project's bin/ directory
+// contains a space in its name (e.g. "Any CPU"). This matters because
+// dotnet test <csproj> --no-build can resolve the DLL to such a path,
+// and vstest internally splits the path at the space, causing failures.
+func binHasSpacedDirs(projectPath string) bool {
+	binDir := filepath.Join(filepath.Dir(projectPath), "bin")
+	entries, err := os.ReadDir(binDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.ContainsRune(e.Name(), ' ') {
+			return true
+		}
+	}
+	return false
+}
+
 // sortedKeys returns sorted keys of a map.
 func sortedKeys(m map[string]bool) []string {
 	keys := make([]string, 0, len(m))
